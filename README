@@ -2,10 +2,28 @@
 
 **ntfs3** is a filesystem kernel module for Linux kernel that is developed by Paragon Software.
 
-This **unofficial** out-of-tree module is tested to be compatible with `linux-generic-hwe-20.04` on x86-64 Ubuntu LTS.
+This **unofficial** out-of-tree module is tested to be compatible with Linux kernel 5.8 and later
 
 ## Disclaimers
 Authorship and copyright are held by Paragon Software GmbH, while [rmnscnce](https://www.github.com/rmnscnce) is the maintainer of this "port"
+
+## Installation
+#### * Standard
+~~~
+make -j$(cat nproc) KVER=<your.kernel.version> # if left blank, it will build for the current running kernel
+sudo make install
+
+# To uninstall:
+sudo make uninstall
+~~~
+
+#### * DKMS (recommended)
+~~~
+sudo make dkms # it will register the DKMS module and install for the current running kernel
+
+# To uninstall:
+sudo make dkms-uninstall
+~~~
 
 ## Documentation
 `docs/ntfs3.rst`:

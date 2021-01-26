@@ -144,6 +144,8 @@ enum index_mutex_classed {
 struct ntfs_index {
 	struct runs_tree bitmap_run;
 	struct runs_tree alloc_run;
+	/* read/write access to 'bitmap_run'/'alloc_run' while ntfs_readdir */
+	struct rw_semaphore run_lock;
 
 	/*TODO: remove 'cmp'*/
 	NTFS_CMP_FUNC cmp;
@@ -323,6 +325,11 @@ struct ntfs_inode {
 	 */
 	struct rb_root mi_tree;
 
+	/*
+	 * This member is used in ntfs_readdir to ensure that all subrecords are loaded
+	 */
+	u8 mi_loaded;
+
 	union {
 		struct ntfs_index dir;
 		struct {
@@ -387,8 +394,9 @@ int attr_data_write_resident(struct ntfs_inode *ni, struct page *page);
 int attr_load_runs_vcn(struct ntfs_inode *ni, enum ATTR_TYPE type,
 		       const __le16 *name, u8 name_len, struct runs_tree *run,
 		       CLST vcn);
-int attr_wof_load_runs_range(struct ntfs_inode *ni, struct runs_tree *run,
-			     u64 from, u64 to);
+int attr_load_runs_range(struct ntfs_inode *ni, enum ATTR_TYPE type,
+			 const __le16 *name, u8 name_len, struct runs_tree *run,
+			 u64 from, u64 to);
 int attr_wof_frame_info(struct ntfs_inode *ni, struct ATTRIB *attr,
 			struct runs_tree *run, u64 frame, u64 frames,
 			u8 frame_bits, u32 *ondisk_size, u64 *vbo_data);
@@ -446,7 +454,6 @@ int ntfs_getattr(const struct path *path, struct kstat *stat, u32 request_mask,
 		 u32 flags);
 void ntfs_sparse_cluster(struct inode *inode, struct page *page0, CLST vcn,
 			 CLST len);
-int ntfs_file_fsync(struct file *filp, loff_t start, loff_t end, int datasync);
 int ntfs3_setattr(struct dentry *dentry, struct iattr *attr);
 int ntfs_file_open(struct inode *inode, struct file *file);
 int ntfs_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
@@ -743,9 +750,9 @@ int ntfs_trim_fs(struct ntfs_sb_info *sbi, struct fstrim_range *range);
 
 /* globals from upcase.c */
 int ntfs_cmp_names(const __le16 *s1, size_t l1, const __le16 *s2, size_t l2,
-		   const u16 *upcase);
+		   const u16 *upcase, bool bothcase);
 int ntfs_cmp_names_cpu(const struct cpu_str *uni1, const struct le_str *uni2,
-		       const u16 *upcase);
+		       const u16 *upcase, bool bothcase);
 
 /* globals from xattr.c */
 #ifdef CONFIG_NTFS3_FS_POSIX_ACL
@@ -828,7 +835,7 @@ static inline void run_init(struct runs_tree *run)
 
 static inline struct runs_tree *run_alloc(void)
 {
-	return ntfs_alloc(sizeof(struct runs_tree), 1);
+	return ntfs_zalloc(sizeof(struct runs_tree));
 }
 
 static inline void run_close(struct runs_tree *run)

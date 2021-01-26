@@ -4,9 +4,9 @@
 #
 
 KMODNAME=ntfs3
-KMODVER=v17_20201231.lore
+KMODVER=v18_20210122.lore
 
-obj-m += ntfs3.o
+obj-$(CONFIG_NTFS3_FS) += ntfs3.o
 
 ntfs3-objs :=	attrib.o \
 		attrlist.o \
@@ -36,6 +36,9 @@ endif
 KDIR ?= /lib/modules/${KERNELRELEASE}/build
 MDIR ?= /lib/modules/${KERNELRELEASE}
 PWD  := $(shell pwd)
+
+export CONFIG_NTFS3_FS := m
+export CONFIG_NTFS3_64BIT_CLUSTER := n
 
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules

@@ -181,7 +181,7 @@ next_attr:
 		names += 1;
 		if (name && name->len == fname->name_len &&
 		    !ntfs_cmp_names_cpu(name, (struct le_str *)&fname->name_len,
-					NULL))
+					NULL, false))
 			is_match = true;
 
 		goto next_attr;
@@ -408,6 +408,7 @@ end_enum:
 		inode->i_op = &ntfs_dir_inode_operations;
 		inode->i_fop = &ntfs_dir_operations;
 		ni->i_valid = 0;
+		init_rwsem(&ni->dir.run_lock);
 	} else if (S_ISLNK(mode)) {
 		ni->std_fa &= ~FILE_ATTRIBUTE_DIRECTORY;
 		inode->i_op = &ntfs_link_inode_operations;
@@ -1116,7 +1117,7 @@ ntfs_create_reparse_buffer(struct ntfs_sb_info *sbi, const char *symname,
 	__le16 *rp_name;
 	typeof(rp->SymbolicLinkReparseBuffer) *rs;
 
-	rp = ntfs_alloc(ntfs_reparse_bytes(2 * size + 2), 1);
+	rp = ntfs_zalloc(ntfs_reparse_bytes(2 * size + 2));
 	if (!rp)
 		return ERR_PTR(-ENOMEM);
 
@@ -1561,6 +1562,7 @@ int ntfs_create_inode(struct inode *dir, struct dentry *dentry,
 			mode |= S_ISGID;
 		inode->i_op = &ntfs_dir_inode_operations;
 		inode->i_fop = &ntfs_dir_operations;
+		init_rwsem(&ni->dir.run_lock);
 	} else if (is_link) {
 		inode->i_op = &ntfs_link_inode_operations;
 		inode->i_fop = NULL;
@@ -1761,8 +1763,6 @@ int ntfs_unlink_inode(struct inode *dir, const struct dentry *dentry)
 	if (err < 0)
 		goto out4;
 
-	le = NULL;
-
 	/*mark rw ntfs as dirty. it will be cleared at umount*/
 	ntfs_set_state(sbi, NTFS_DIRTY_DIRTY);
 
@@ -1776,6 +1776,7 @@ int ntfs_unlink_inode(struct inode *dir, const struct dentry *dentry)
 #endif
 	ref.seq = dir_ni->mi.mrec->seq;
 
+	le = NULL;
 	fname = ni_fname_name(ni, uni, &ref, &le);
 	if (!fname) {
 		err = -ENOENT;
@@ -1887,7 +1888,7 @@ static noinline int ntfs_readlink_hlp(struct inode *inode, char *buffer,
 			goto out;
 		}
 	} else {
-		rp = ntfs_alloc(i_size, 0);
+		rp = ntfs_malloc(i_size);
 		if (!rp) {
 			err = -ENOMEM;
 			goto out;
