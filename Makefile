@@ -4,7 +4,7 @@
 #
 
 KMODNAME=ntfs3
-KMODVER=v18_20210122.lore
+KMODVER=v18_20210122.lore+rev0
 
 obj-$(CONFIG_NTFS3_FS) += ntfs3.o
 

@@ -1410,7 +1410,7 @@ static struct dentry *ntfs_mount(struct file_system_type *fs_type, int flags,
 
 static struct file_system_type ntfs_fs_type = {
 	.owner = THIS_MODULE,
-	.name = "ntfs",
+	.name = "ntfs3",
 	.mount = ntfs_mount,
 	.kill_sb = kill_block_super,
 	.fs_flags = FS_REQUIRES_DEV,

@@ -8,7 +8,7 @@ This **unofficial** out-of-tree module is tested to be compatible with Linux ker
 Authorship and copyright are held by Paragon Software GmbH, while [rmnscnce](https://www.github.com/rmnscnce) is the maintainer of this "port"
 
 ## Installation
-#### * Standard
+#### Standard
 ~~~
 make -j$(cat nproc) KVER=<your.kernel.version> # if left blank, it will build for the current running kernel
 sudo make install
@@ -17,7 +17,8 @@ sudo make install
 sudo make uninstall
 ~~~
 
-#### * DKMS (recommended)
+#### DKMS (recommended)
+##### Dependency: `dkms`
 ~~~
 sudo make dkms # it will register the DKMS module and install for the current running kernel
 
@@ -25,8 +26,12 @@ sudo make dkms # it will register the DKMS module and install for the current ru
 sudo make dkms-uninstall
 ~~~
 
+## Bugs
+#####※ Report bugs and other issues to the maintainer, almaz.alexandrovich@paragon-software.com, NOT this repo issue tracker
+- Cannot mount the filesystem using the `acl` option (POSIX ACLs basically not working)
+
 ## Documentation
-`docs/ntfs3.rst`:
+(docs/ntfs3.rst)[docs/ntfs3.rst]:
 ~~~
 =====
 NTFS3
