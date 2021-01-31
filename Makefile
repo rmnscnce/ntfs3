@@ -4,7 +4,7 @@
 #
 
 KMODNAME=ntfs3
-KMODVER=v18_20210122.lore+rev0
+KMODVER=v19_20210128.lore
 
 obj-$(CONFIG_NTFS3_FS) += ntfs3.o
 
@@ -39,6 +39,8 @@ PWD  := $(shell pwd)
 
 export CONFIG_NTFS3_FS := m
 export CONFIG_NTFS3_64BIT_CLUSTER := n
+export CONFIG_NTFS3_LZX_XPRESS := y
+export CONFIG_NTFS3_FS_POSIX_ACL := y
 
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules

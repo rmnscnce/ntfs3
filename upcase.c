@@ -30,7 +30,7 @@ int ntfs_cmp_names(const __le16 *s1, size_t l1, const __le16 *s2, size_t l2,
 {
 	int diff1 = 0;
 	int diff2;
-	size_t len = l1 < l2 ? l1 : l2;
+	size_t len = min(l1, l2);
 
 	if (!bothcase && upcase)
 		goto case_insentive;
@@ -67,7 +67,7 @@ int ntfs_cmp_names_cpu(const struct cpu_str *uni1, const struct le_str *uni2,
 	const __le16 *s2 = uni2->name;
 	size_t l1 = uni1->len;
 	size_t l2 = uni2->len;
-	size_t len = l1 < l2 ? l1 : l2;
+	size_t len = min(l1, l2);
 	int diff1 = 0;
 	int diff2;
 

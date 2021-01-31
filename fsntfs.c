@@ -1916,7 +1916,7 @@ int ntfs_security_init(struct ntfs_sb_info *sbi)
 	if (err)
 		goto out;
 
-	fnd_sii = fnd_get(indx_sii);
+	fnd_sii = fnd_get();
 	if (!fnd_sii) {
 		err = -ENOMEM;
 		goto out;
@@ -1985,7 +1985,7 @@ int ntfs_get_security_by_id(struct ntfs_sb_info *sbi, __le32 security_id,
 
 	mutex_lock_nested(&ni->ni_lock, NTFS_INODE_MUTEX_SECURITY);
 
-	fnd_sii = fnd_get(indx);
+	fnd_sii = fnd_get();
 	if (!fnd_sii) {
 		err = -ENOMEM;
 		goto out;
@@ -2108,7 +2108,7 @@ int ntfs_insert_security(struct ntfs_sb_info *sbi,
 
 	mutex_lock_nested(&ni->ni_lock, NTFS_INODE_MUTEX_SECURITY);
 
-	fnd_sdh = fnd_get(indx_sdh);
+	fnd_sdh = fnd_get();
 	if (!fnd_sdh) {
 		err = -ENOMEM;
 		goto out;
@@ -2424,7 +2424,7 @@ int ntfs_remove_reparse(struct ntfs_sb_info *sbi, __le32 rtag,
 		goto out1;
 	}
 
-	fnd = fnd_get(indx);
+	fnd = fnd_get();
 	if (!fnd) {
 		err = -ENOMEM;
 		goto out1;

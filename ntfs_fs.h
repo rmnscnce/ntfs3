@@ -591,8 +591,17 @@ int run_deallocate(struct ntfs_sb_info *sbi, struct runs_tree *run, bool trim);
 /* globals from index.c */
 int indx_used_bit(struct ntfs_index *indx, struct ntfs_inode *ni, size_t *bit);
 void fnd_clear(struct ntfs_fnd *fnd);
-struct ntfs_fnd *fnd_get(struct ntfs_index *indx);
-void fnd_put(struct ntfs_fnd *fnd);
+static inline struct ntfs_fnd *fnd_get(void)
+{
+	return ntfs_zalloc(sizeof(struct ntfs_fnd));
+}
+static inline void fnd_put(struct ntfs_fnd *fnd)
+{
+	if (fnd) {
+		fnd_clear(fnd);
+		ntfs_free(fnd);
+	}
+}
 void indx_clear(struct ntfs_index *idx);
 int indx_init(struct ntfs_index *indx, struct ntfs_sb_info *sbi,
 	      const struct ATTRIB *attr, enum index_mutex_classed type);

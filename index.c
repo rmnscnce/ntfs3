@@ -645,24 +645,6 @@ static bool fnd_is_empty(struct ntfs_fnd *fnd)
 	return !fnd->de[fnd->level - 1];
 }
 
-struct ntfs_fnd *fnd_get(struct ntfs_index *indx)
-{
-	struct ntfs_fnd *fnd = ntfs_zalloc(sizeof(struct ntfs_fnd));
-
-	if (!fnd)
-		return NULL;
-
-	return fnd;
-}
-
-void fnd_put(struct ntfs_fnd *fnd)
-{
-	if (!fnd)
-		return;
-	fnd_clear(fnd);
-	ntfs_free(fnd);
-}
-
 /*
  * hdr_find_e
  *
@@ -923,8 +905,9 @@ int indx_init(struct ntfs_index *indx, struct ntfs_sb_info *sbi,
 		indx->vbn2vbo_bits = sbi->cluster_bits;
 	}
 
-	indx->cmp = get_cmp_func(root);
+	init_rwsem(&indx->run_lock);
 
+	indx->cmp = get_cmp_func(root);
 	return indx->cmp ? 0 : -EINVAL;
 }
 
@@ -1415,6 +1398,7 @@ static int indx_create_allocate(struct ntfs_index *indx, struct ntfs_inode *ni,
 	struct ATTRIB *bitmap;
 	struct ATTRIB *alloc;
 	u32 alloc_size = ntfs_up_cluster(sbi, 1u << indx->index_bits);
+	u32 bmp_size = QuadAlign(((alloc_size >> indx->index_bits) + 7) >> 3);
 	CLST len = alloc_size >> sbi->cluster_bits;
 	const struct INDEX_NAMES *in = &s_index_names[indx->type];
 	CLST alen;
@@ -1432,7 +1416,7 @@ static int indx_create_allocate(struct ntfs_index *indx, struct ntfs_inode *ni,
 	if (err)
 		goto out1;
 
-	err = ni_insert_resident(ni, QuadAlign(1), ATTR_BITMAP, in->name,
+	err = ni_insert_resident(ni, bmp_size, ATTR_BITMAP, in->name,
 				 in->name_len, &bitmap, NULL);
 	if (err)
 		goto out2;
@@ -1467,7 +1451,7 @@ static int indx_add_allocate(struct ntfs_index *indx, struct ntfs_inode *ni,
 	int err;
 	size_t bit;
 	u64 data_size, alloc_size;
-	u64 bpb, vbpb;
+	u64 bmp_size, bmp_size_v;
 	struct ATTRIB *bmp, *alloc;
 	struct mft_inode *mi;
 	const struct INDEX_NAMES *in = &s_index_names[indx->type];
@@ -1480,20 +1464,27 @@ static int indx_add_allocate(struct ntfs_index *indx, struct ntfs_inode *ni,
 		bmp = NULL;
 	} else {
 		if (bmp->non_res) {
-			bpb = le64_to_cpu(bmp->nres.data_size);
-			vbpb = le64_to_cpu(bmp->nres.valid_size);
+			bmp_size = le64_to_cpu(bmp->nres.data_size);
+			bmp_size_v = le64_to_cpu(bmp->nres.valid_size);
 		} else {
-			bpb = vbpb = le32_to_cpu(bmp->res.data_size);
+			bmp_size = bmp_size_v = le32_to_cpu(bmp->res.data_size);
 		}
+
+		bit = bmp_size << 3;
+	}
+
+	data_size = (u64)(bit + 1) << indx->index_bits;
+	alloc_size = ntfs_up_cluster(ni->mi.sbi, data_size);
+
+	if (bmp) {
+		u64 bits = ((alloc_size >> indx->index_bits) + 7) >> 3;
 
 		/* Increase bitmap */
 		err = attr_set_size(ni, ATTR_BITMAP, in->name, in->name_len,
-				    &indx->bitmap_run, QuadAlign(bpb + 8), NULL,
+				    &indx->bitmap_run, QuadAlign(bits), NULL,
 				    true, NULL);
 		if (err)
 			goto out1;
-
-		bit = bpb << 3;
 	}
 
 	alloc = ni_find_attr(ni, NULL, NULL, ATTR_ALLOC, in->name, in->name_len,
@@ -1503,9 +1494,6 @@ static int indx_add_allocate(struct ntfs_index *indx, struct ntfs_inode *ni,
 			goto out2;
 		goto out1;
 	}
-
-	data_size = (u64)(bit + 1) << indx->index_bits;
-	alloc_size = ntfs_up_cluster(ni->mi.sbi, data_size);
 
 	if (alloc_size > le64_to_cpu(alloc->nres.alloc_size)) {
 		/* Increase allocation */
@@ -1533,7 +1521,7 @@ static int indx_add_allocate(struct ntfs_index *indx, struct ntfs_inode *ni,
 out2:
 	/* Ops (no space?) */
 	attr_set_size(ni, ATTR_BITMAP, in->name, in->name_len,
-		      &indx->bitmap_run, bpb, &vbpb, false, NULL);
+		      &indx->bitmap_run, bmp_size, &bmp_size_v, false, NULL);
 
 out1:
 	return err;
@@ -1916,7 +1904,7 @@ int indx_insert_entry(struct ntfs_index *indx, struct ntfs_inode *ni,
 	struct INDEX_ROOT *root;
 
 	if (!fnd) {
-		fnd_a = fnd_get(indx);
+		fnd_a = fnd_get();
 		if (!fnd_a) {
 			err = -ENOMEM;
 			goto out1;
@@ -2244,13 +2232,13 @@ int indx_delete_entry(struct ntfs_index *indx, struct ntfs_inode *ni,
 	size_t trim_bit;
 	const struct INDEX_NAMES *in;
 
-	fnd = fnd_get(indx);
+	fnd = fnd_get();
 	if (!fnd) {
 		err = -ENOMEM;
 		goto out2;
 	}
 
-	fnd2 = fnd_get(NULL);
+	fnd2 = fnd_get();
 	if (!fnd2) {
 		err = -ENOMEM;
 		goto out1;
@@ -2619,7 +2607,7 @@ int indx_update_dup(struct ntfs_inode *ni, struct ntfs_sb_info *sbi,
 	struct mft_inode *mi;
 	struct ntfs_index *indx = &ni->dir;
 
-	fnd = fnd_get(indx);
+	fnd = fnd_get();
 	if (!fnd) {
 		err = -ENOMEM;
 		goto out1;

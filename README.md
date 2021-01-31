@@ -1,6 +1,6 @@
 # ntfs3
 
-**ntfs3** is a filesystem kernel module for Linux kernel that is developed by Paragon Software.
+**ntfs3** is a free (as in free beer **and** free speech) filesystem kernel module for Linux kernel that is developed by Paragon Software.
 
 This **unofficial** out-of-tree module is tested to be compatible with Linux kernel 5.8 and later
 
@@ -27,7 +27,7 @@ sudo make dkms-uninstall
 ~~~
 
 ## Bugs
-#####※ Report bugs and other issues to the maintainer, almaz.alexandrovich@paragon-software.com, NOT this repo issue tracker
+##### ※ Refer to MAINTAINERS for patch submission, bug fixes, etc.
 - Cannot mount the filesystem using the `acl` option (POSIX ACLs basically not working)
 
 ## Documentation

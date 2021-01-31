@@ -233,7 +233,7 @@ struct inode *dir_search_u(struct inode *dir, const struct cpu_str *uni,
 	struct ntfs_fnd *fnd_a = NULL;
 
 	if (!fnd) {
-		fnd_a = fnd_get(&ni->dir);
+		fnd_a = fnd_get();
 		if (!fnd_a) {
 			err = -ENOMEM;
 			goto out;

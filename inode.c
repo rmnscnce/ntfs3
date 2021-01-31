@@ -408,7 +408,6 @@ end_enum:
 		inode->i_op = &ntfs_dir_inode_operations;
 		inode->i_fop = &ntfs_dir_operations;
 		ni->i_valid = 0;
-		init_rwsem(&ni->dir.run_lock);
 	} else if (S_ISLNK(mode)) {
 		ni->std_fa &= ~FILE_ATTRIBUTE_DIRECTORY;
 		inode->i_op = &ntfs_link_inode_operations;
@@ -1562,7 +1561,6 @@ int ntfs_create_inode(struct inode *dir, struct dentry *dentry,
 			mode |= S_ISGID;
 		inode->i_op = &ntfs_dir_inode_operations;
 		inode->i_fop = &ntfs_dir_operations;
-		init_rwsem(&ni->dir.run_lock);
 	} else if (is_link) {
 		inode->i_op = &ntfs_link_inode_operations;
 		inode->i_fop = NULL;
