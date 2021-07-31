@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  *
- * Copyright (C) 2019-2020 Paragon Software GmbH, All rights reserved.
+ * Copyright (C) 2019-2021 Paragon Software GmbH, All rights reserved.
  *
  */
 
@@ -243,8 +243,8 @@ next_attr:
 		if (!attr->nres.alloc_size)
 			goto next_attr;
 
-		run = ino == MFT_REC_BITMAP ? &sbi->used.bitmap.run :
-					      &ni->file.run;
+		run = ino == MFT_REC_BITMAP ? &sbi->used.bitmap.run
+					    : &ni->file.run;
 		break;
 
 	case ATTR_ROOT:
@@ -271,9 +271,9 @@ next_attr:
 		if (err)
 			goto out;
 
-		mode = sb->s_root ?
-			       (S_IFDIR | (0777 & sbi->options.fs_dmask_inv)) :
-			       (S_IFDIR | 0777);
+		mode = sb->s_root
+			       ? (S_IFDIR | (0777 & sbi->options.fs_dmask_inv))
+			       : (S_IFDIR | 0777);
 		goto next_attr;
 
 	case ATTR_ALLOC:
@@ -292,7 +292,7 @@ next_attr:
 		if (ino == MFT_REC_MFT) {
 			if (!attr->non_res)
 				goto out;
-#ifndef NTFS3_64BIT_CLUSTER
+#ifndef CONFIG_NTFS3_64BIT_CLUSTER
 			/* 0x20000000 = 2^32 / 8 */
 			if (le64_to_cpu(attr->nres.alloc_size) >= 0x20000000)
 				goto out;
@@ -465,15 +465,18 @@ out:
 }
 
 /* returns 1 if match */
-static int ntfs_test_inode(struct inode *inode, const struct MFT_REF *ref)
+static int ntfs_test_inode(struct inode *inode, void *data)
 {
+	struct MFT_REF *ref = data;
+
 	return ino_get(ref) == inode->i_ino;
 }
 
-static int ntfs_set_inode(struct inode *inode, const struct MFT_REF *ref)
+static int ntfs_set_inode(struct inode *inode, void *data)
 {
-	inode->i_ino = ino_get(ref);
+	const struct MFT_REF *ref = data;
 
+	inode->i_ino = ino_get(ref);
 	return 0;
 }
 
@@ -482,9 +485,7 @@ struct inode *ntfs_iget5(struct super_block *sb, const struct MFT_REF *ref,
 {
 	struct inode *inode;
 
-	inode = iget5_locked(sb, ino_get(ref),
-			     (int (*)(struct inode *, void *))ntfs_test_inode,
-			     (int (*)(struct inode *, void *))ntfs_set_inode,
+	inode = iget5_locked(sb, ino_get(ref), ntfs_test_inode, ntfs_set_inode,
 			     (void *)ref);
 	if (unlikely(!inode))
 		return ERR_PTR(-ENOMEM);
@@ -761,8 +762,8 @@ static ssize_t ntfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	}
 
 	ret = blockdev_direct_IO(iocb, inode, iter,
-				 wr ? ntfs_get_block_direct_IO_W :
-				      ntfs_get_block_direct_IO_R);
+				 wr ? ntfs_get_block_direct_IO_W
+				    : ntfs_get_block_direct_IO_R);
 	valid = ni->i_valid;
 	if (wr) {
 		if (ret <= 0)
@@ -1175,10 +1176,11 @@ out:
 	return ERR_PTR(err);
 }
 
-int ntfs_create_inode(struct inode *dir, struct dentry *dentry,
-		      const struct cpu_str *uni, umode_t mode, dev_t dev,
-		      const char *symname, u32 size, int excl,
-		      struct ntfs_fnd *fnd, struct inode **new_inode)
+struct inode *ntfs_create_inode(struct user_namespace *mnt_userns,
+				struct inode *dir, struct dentry *dentry,
+				const struct cpu_str *uni, umode_t mode,
+				dev_t dev, const char *symname, u32 size,
+				int excl, struct ntfs_fnd *fnd)
 {
 	int err;
 	struct super_block *sb = dir->i_sb;
@@ -1208,16 +1210,23 @@ int ntfs_create_inode(struct inode *dir, struct dentry *dentry,
 		     S_ISSOCK(mode);
 
 	if (is_sp)
-		return -EOPNOTSUPP;
+		return ERR_PTR(-EOPNOTSUPP);
 
 	dir_root = indx_get_root(&dir_ni->dir, dir_ni, NULL, NULL);
 	if (!dir_root)
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 
 	if (is_dir) {
 		/* use parent's directory attributes */
 		fa = dir_ni->std_fa | FILE_ATTRIBUTE_DIRECTORY |
 		     FILE_ATTRIBUTE_ARCHIVE;
+		/*
+		 * By default child directory inherits parent attributes
+		 * root directory is hidden + system
+		 * Make an exception for children in root
+		 */
+		if (dir->i_ino == MFT_REC_ROOT)
+			fa &= ~(FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
 	} else if (is_link) {
 		/* It is good idea that link should be the same type (file/dir) as target */
 		fa = FILE_ATTRIBUTE_REPARSE_POINT;
@@ -1337,18 +1346,10 @@ int ntfs_create_inode(struct inode *dir, struct dentry *dentry,
 	if (err)
 		goto out4;
 
+	mi_get_ref(&ni->mi, &new_de->ref);
+
 	fname = (struct ATTR_FILE_NAME *)(new_de + 1);
-
-	new_de->ref.low = cpu_to_le32(ino);
-#ifdef NTFS3_64BIT_CLUSTER
-	new_de->ref.high = cpu_to_le16(ino >> 32);
-	fname->home.high = cpu_to_le16(dir->i_ino >> 32);
-#endif
-	new_de->ref.seq = rec->seq;
-
-	fname->home.low = cpu_to_le32(dir->i_ino & 0xffffffff);
-	fname->home.seq = dir_ni->mi.mrec->seq;
-
+	mi_get_ref(&dir_ni->mi, &fname->home);
 	fname->dup.cr_time = fname->dup.m_time = fname->dup.c_time =
 		fname->dup.a_time = std5->cr_time;
 	fname->dup.alloc_size = fname->dup.data_size = 0;
@@ -1548,10 +1549,9 @@ int ntfs_create_inode(struct inode *dir, struct dentry *dentry,
 
 	/* Fill vfs inode fields */
 	inode->i_uid = sbi->options.uid ? sbi->options.fs_uid : current_fsuid();
-	inode->i_gid =
-		sbi->options.gid ?
-			sbi->options.fs_gid :
-			(dir->i_mode & S_ISGID) ? dir->i_gid : current_fsgid();
+	inode->i_gid = sbi->options.gid		 ? sbi->options.fs_gid
+		       : (dir->i_mode & S_ISGID) ? dir->i_gid
+						 : current_fsgid();
 	inode->i_generation = le16_to_cpu(rec->seq);
 
 	dir->i_mtime = dir->i_ctime = inode->i_atime;
@@ -1577,7 +1577,7 @@ int ntfs_create_inode(struct inode *dir, struct dentry *dentry,
 
 #ifdef CONFIG_NTFS3_FS_POSIX_ACL
 	if (!is_link && (sb->s_flags & SB_POSIXACL)) {
-		err = ntfs_init_acl(inode, dir);
+		err = ntfs_init_acl(mnt_userns, inode, dir);
 		if (err)
 			goto out6;
 	} else
@@ -1631,12 +1631,11 @@ out2:
 
 out1:
 	if (err)
-		return err;
+		return ERR_PTR(err);
 
 	unlock_new_inode(inode);
 
-	*new_inode = inode;
-	return 0;
+	return inode;
 }
 
 int ntfs_link_inode(struct inode *inode, struct dentry *dentry)
@@ -1672,22 +1671,14 @@ int ntfs_link_inode(struct inode *inode, struct dentry *dentry)
 		goto out;
 
 	key_size = le16_to_cpu(new_de->key_size);
-	fname = (struct ATTR_FILE_NAME *)(new_de + 1);
-
 	err = ni_insert_resident(ni, key_size, ATTR_NAME, NULL, 0, &attr, NULL);
 	if (err)
 		goto out;
 
-	new_de->ref.low = cpu_to_le32(inode->i_ino);
-#ifdef NTFS3_64BIT_CLUSTER
-	new_de->ref.high = cpu_to_le16(inode->i_ino >> 32);
-	fname->home.high = cpu_to_le16(dir->i_ino >> 32);
-#endif
-	new_de->ref.seq = ni->mi.mrec->seq;
+	mi_get_ref(&ni->mi, &new_de->ref);
 
-	fname->home.low = cpu_to_le32(dir->i_ino & 0xffffffff);
-	fname->home.seq = dir_ni->mi.mrec->seq;
-
+	fname = (struct ATTR_FILE_NAME *)(new_de + 1);
+	mi_get_ref(&dir_ni->mi, &fname->home);
 	fname->dup.cr_time = fname->dup.m_time = fname->dup.c_time =
 		fname->dup.a_time = kernel2nt(&inode->i_ctime);
 	fname->dup.alloc_size = fname->dup.data_size = 0;
@@ -1759,20 +1750,13 @@ int ntfs_unlink_inode(struct inode *dir, const struct dentry *dentry)
 	err = ntfs_nls_to_utf16(sbi, name->name, name->len, uni, NTFS_NAME_LEN,
 				UTF16_HOST_ENDIAN);
 	if (err < 0)
-		goto out4;
+		goto out2;
 
 	/*mark rw ntfs as dirty. it will be cleared at umount*/
 	ntfs_set_state(sbi, NTFS_DIRTY_DIRTY);
 
 	/* find name in record */
-#ifdef NTFS3_64BIT_CLUSTER
-	ref.low = cpu_to_le32(dir->i_ino & 0xffffffff);
-	ref.high = cpu_to_le16(dir->i_ino >> 32);
-#else
-	ref.low = cpu_to_le32(dir->i_ino & 0xffffffff);
-	ref.high = 0;
-#endif
-	ref.seq = dir_ni->mi.mrec->seq;
+	mi_get_ref(&dir_ni->mi, &ref);
 
 	le = NULL;
 	fname = ni_fname_name(ni, uni, &ref, &le);
@@ -1786,7 +1770,7 @@ int ntfs_unlink_inode(struct inode *dir, const struct dentry *dentry)
 	err = indx_delete_entry(indx, dir_ni, fname, fname_full_size(fname),
 				sbi);
 	if (err)
-		goto out4;
+		goto out3;
 
 	/* Then remove name from mft */
 	ni_remove_attr_le(ni, attr_from_name(fname), le);
@@ -1801,15 +1785,14 @@ int ntfs_unlink_inode(struct inode *dir, const struct dentry *dentry)
 			err = indx_delete_entry(indx, dir_ni, fname,
 						fname_full_size(fname), sbi);
 			if (err)
-				goto out4;
+				goto out3;
 
 			ni_remove_attr_le(ni, attr_from_name(fname), le);
 
 			le16_add_cpu(&ni->mi.mrec->hard_links, -1);
 		}
 	}
-
-out4:
+out3:
 	switch (err) {
 	case 0:
 		drop_nlink(inode);
@@ -1827,7 +1810,7 @@ out4:
 	if (inode->i_nlink)
 		mark_inode_dirty(inode);
 
-out3:
+out2:
 	__putname(uni);
 out1:
 	ni_unlock(ni);
@@ -2042,6 +2025,7 @@ const struct address_space_operations ntfs_aops = {
 	.write_end = ntfs_write_end,
 	.direct_IO = ntfs_direct_IO,
 	.bmap = ntfs_bmap,
+	.set_page_dirty = __set_page_dirty_buffers,
 };
 
 const struct address_space_operations ntfs_aops_cmpr = {

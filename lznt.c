@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  *
- * Copyright (C) 2019-2020 Paragon Software GmbH, All rights reserved.
+ * Copyright (C) 2019-2021 Paragon Software GmbH, All rights reserved.
  *
  */
 #include <linux/blkdev.h>
@@ -294,8 +294,8 @@ next:
  */
 struct lznt *get_lznt_ctx(int level)
 {
-	struct lznt *r = ntfs_zalloc(level ? offsetof(struct lznt, hash) :
-					     sizeof(struct lznt));
+	struct lznt *r = ntfs_zalloc(level ? offsetof(struct lznt, hash)
+					   : sizeof(struct lznt));
 
 	if (r)
 		r->std = !level;
@@ -391,9 +391,9 @@ ssize_t decompress_lznt(const void *cmpr, size_t cmpr_size, void *unc,
 			unc_use = err;
 		} else {
 			/* This chunk does not contain compressed data */
-			unc_use = unc_chunk + LZNT_CHUNK_SIZE > unc_end ?
-					  unc_end - unc_chunk :
-					  LZNT_CHUNK_SIZE;
+			unc_use = unc_chunk + LZNT_CHUNK_SIZE > unc_end
+					  ? unc_end - unc_chunk
+					  : LZNT_CHUNK_SIZE;
 
 			if (cmpr_chunk + sizeof(chunk_hdr) + unc_use >
 			    cmpr_end) {

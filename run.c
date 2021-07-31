@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  *
- * Copyright (C) 2019-2020 Paragon Software GmbH, All rights reserved.
+ * Copyright (C) 2019-2021 Paragon Software GmbH, All rights reserved.
  *
+ * TODO: try to use extents tree (instead of array)
  */
 
 #include <linux/blkdev.h>
@@ -46,7 +47,7 @@ bool run_lookup(const struct runs_tree *run, CLST vcn, size_t *index)
 	max_idx = run->count - 1;
 
 	/* Check boundary cases specially, 'cause they cover the often requests */
-	r = run->runs_;
+	r = run->runs;
 	if (vcn < r->vcn) {
 		*index = 0;
 		return false;
@@ -70,7 +71,7 @@ bool run_lookup(const struct runs_tree *run, CLST vcn, size_t *index)
 
 	do {
 		mid_idx = min_idx + ((max_idx - min_idx) >> 1);
-		r = run->runs_ + mid_idx;
+		r = run->runs + mid_idx;
 
 		if (vcn < r->vcn) {
 			max_idx = mid_idx - 1;
@@ -96,7 +97,7 @@ bool run_lookup(const struct runs_tree *run, CLST vcn, size_t *index)
 static void run_consolidate(struct runs_tree *run, size_t index)
 {
 	size_t i;
-	struct ntfs_run *r = run->runs_ + index;
+	struct ntfs_run *r = run->runs + index;
 
 	while (index + 1 < run->count) {
 		/*
@@ -172,8 +173,8 @@ bool run_is_mapped_full(const struct runs_tree *run, CLST svcn, CLST evcn)
 	if (!run_lookup(run, svcn, &i))
 		return false;
 
-	end = run->runs_ + run->count;
-	r = run->runs_ + i;
+	end = run->runs + run->count;
+	r = run->runs + i;
 
 	for (;;) {
 		next_vcn = r->vcn + r->len;
@@ -196,13 +197,13 @@ bool run_lookup_entry(const struct runs_tree *run, CLST vcn, CLST *lcn,
 	struct ntfs_run *r;
 
 	/* Fail immediately if nrun was not touched yet. */
-	if (!run->runs_)
+	if (!run->runs)
 		return false;
 
 	if (!run_lookup(run, vcn, &idx))
 		return false;
 
-	r = run->runs_ + idx;
+	r = run->runs + idx;
 
 	if (vcn >= r->vcn + r->len)
 		return false;
@@ -232,7 +233,7 @@ void run_truncate_head(struct runs_tree *run, CLST vcn)
 	struct ntfs_run *r;
 
 	if (run_lookup(run, vcn, &index)) {
-		r = run->runs_ + index;
+		r = run->runs + index;
 
 		if (vcn > r->vcn) {
 			CLST dlen = vcn - r->vcn;
@@ -246,14 +247,14 @@ void run_truncate_head(struct runs_tree *run, CLST vcn)
 		if (!index)
 			return;
 	}
-	r = run->runs_;
+	r = run->runs;
 	memmove(r, r + index, sizeof(*r) * (run->count - index));
 
 	run->count -= index;
 
 	if (!run->count) {
-		ntfs_free(run->runs_);
-		run->runs_ = NULL;
+		ntfs_vfree(run->runs);
+		run->runs = NULL;
 		run->allocated = 0;
 	}
 }
@@ -274,7 +275,7 @@ void run_truncate(struct runs_tree *run, CLST vcn)
 	 * then it will entirely be removed.
 	 */
 	if (run_lookup(run, vcn, &index)) {
-		struct ntfs_run *r = run->runs_ + index;
+		struct ntfs_run *r = run->runs + index;
 
 		r->len = vcn - r->vcn;
 
@@ -291,8 +292,8 @@ void run_truncate(struct runs_tree *run, CLST vcn)
 
 	/* Do not reallocate array 'runs'. Only free if possible */
 	if (!index) {
-		ntfs_free(run->runs_);
-		run->runs_ = NULL;
+		ntfs_vfree(run->runs);
+		run->runs = NULL;
 		run->allocated = 0;
 	}
 }
@@ -303,7 +304,7 @@ void run_truncate_around(struct runs_tree *run, CLST vcn)
 	run_truncate_head(run, vcn);
 
 	if (run->count >= NTFS3_RUN_MAX_BYTES / sizeof(struct ntfs_run) / 2)
-		run_truncate(run, (run->runs_ + (run->count >> 1))->vcn);
+		run_truncate(run, (run->runs + (run->count >> 1))->vcn);
 }
 
 /*
@@ -338,7 +339,7 @@ bool run_add_entry(struct runs_tree *run, CLST vcn, CLST lcn, CLST len,
 	 * existing range as my start point.
 	 */
 	if (!inrange && index > 0) {
-		struct ntfs_run *t = run->runs_ + index - 1;
+		struct ntfs_run *t = run->runs + index - 1;
 
 		if (t->vcn + t->len == vcn &&
 		    (t->lcn == SPARSE_LCN) == (lcn == SPARSE_LCN) &&
@@ -386,25 +387,25 @@ requires_new_range:
 
 			WARN_ON(!is_mft && bytes > NTFS3_RUN_MAX_BYTES);
 
-			new_ptr = ntfs_malloc(bytes);
+			new_ptr = ntfs_vmalloc(bytes);
 
 			if (!new_ptr)
 				return false;
 
 			r = new_ptr + index;
-			memcpy(new_ptr, run->runs_,
+			memcpy(new_ptr, run->runs,
 			       index * sizeof(struct ntfs_run));
-			memcpy(r + 1, run->runs_ + index,
+			memcpy(r + 1, run->runs + index,
 			       sizeof(struct ntfs_run) * (run->count - index));
 
-			ntfs_free(run->runs_);
-			run->runs_ = new_ptr;
+			ntfs_vfree(run->runs);
+			run->runs = new_ptr;
 			run->allocated = bytes;
 
 		} else {
 			size_t i = run->count - index;
 
-			r = run->runs_ + index;
+			r = run->runs + index;
 
 			/* memmove appears to be a bottle neck here... */
 			if (i > 0)
@@ -416,7 +417,7 @@ requires_new_range:
 		r->len = len;
 		run->count += 1;
 	} else {
-		r = run->runs_ + index;
+		r = run->runs + index;
 
 		/*
 		 * If one of ranges was not allocated
@@ -433,9 +434,9 @@ requires_new_range:
 			should_add_tail = Tovcn < r->len;
 
 			if (should_add_tail) {
-				tail_lcn = r->lcn == SPARSE_LCN ?
-						   SPARSE_LCN :
-						   (r->lcn + Tovcn);
+				tail_lcn = r->lcn == SPARSE_LCN
+						   ? SPARSE_LCN
+						   : (r->lcn + Tovcn);
 				tail_vcn = r->vcn + Tovcn;
 				tail_len = r->len - Tovcn;
 			}
@@ -491,8 +492,8 @@ bool run_collapse_range(struct runs_tree *run, CLST vcn, CLST len)
 	if (WARN_ON(!run_lookup(run, vcn, &index)))
 		return true; /* should never be here */
 
-	e = run->runs_ + run->count;
-	r = run->runs_ + index;
+	e = run->runs + run->count;
+	r = run->runs + index;
 	end = vcn + len;
 
 	if (vcn > r->vcn) {
@@ -556,7 +557,7 @@ bool run_get_entry(const struct runs_tree *run, size_t index, CLST *vcn,
 	if (index >= run->count)
 		return false;
 
-	r = run->runs_ + index;
+	r = run->runs + index;
 
 	if (!r->len)
 		return false;
@@ -600,7 +601,7 @@ static inline int run_packed_size(const s64 n)
 		if (!(p[0] & 0x80))
 			p -= 1;
 	}
-	return (const u8 *)n + sizeof(n) - p;
+	return (const u8 *)&n + sizeof(n) - p;
 }
 
 /* full trusted function. It does not check 'size' for errors */
@@ -944,13 +945,13 @@ int run_unpack(struct runs_tree *run, struct ntfs_sb_info *sbi, CLST ino,
 		if (next_vcn > evcn + 1)
 			return -EINVAL;
 
-#ifndef NTFS3_64BIT_CLUSTER
+#ifndef CONFIG_NTFS3_64BIT_CLUSTER
 		if (next_vcn > 0x100000000ull || (lcn + len) > 0x100000000ull) {
 			ntfs_err(
 				sbi->sb,
-				"This driver is compiled whitout NTFS3_64BIT_CLUSTER (like windows driver).\n"
+				"This driver is compiled whitout CONFIG_NTFS3_64BIT_CLUSTER (like windows driver).\n"
 				"Volume contains 64 bits run: vcn %llx, lcn %llx, len %llx.\n"
-				"Activate NTFS3_64BIT_CLUSTER to process this case",
+				"Activate CONFIG_NTFS3_64BIT_CLUSTER to process this case",
 				vcn64, lcn, len);
 			return -EOPNOTSUPP;
 		}
@@ -1007,7 +1008,7 @@ int run_unpack_ex(struct runs_tree *run, struct ntfs_sb_info *sbi, CLST ino,
 	struct wnd_bitmap *wnd;
 
 	ret = run_unpack(run, sbi, ino, svcn, evcn, vcn, run_buf, run_buf_size);
-	if (ret < 0)
+	if (ret <= 0)
 		return ret;
 
 	if (!sbi->used.bitmap.sb || !run || run == RUN_DEALLOCATE)
@@ -1022,8 +1023,6 @@ int run_unpack_ex(struct runs_tree *run, struct ntfs_sb_info *sbi, CLST ino,
 	for (ok = run_lookup_entry(run, vcn, &lcn, &len, &index);
 	     next_vcn <= evcn;
 	     ok = run_get_entry(run, ++index, &vcn, &lcn, &len)) {
-		CLST real_free, i;
-
 		if (!ok || next_vcn != vcn)
 			return -EINVAL;
 
@@ -1035,7 +1034,6 @@ int run_unpack_ex(struct runs_tree *run, struct ntfs_sb_info *sbi, CLST ino,
 		if (sbi->flags & NTFS_FLAGS_NEED_REPLAY)
 			continue;
 
-next:
 		down_read_nested(&wnd->rw_lock, BITMAP_MUTEX_CLUSTERS);
 		/* Check for free blocks */
 		ok = wnd_is_used(wnd, lcn, len);
@@ -1043,40 +1041,33 @@ next:
 		if (ok)
 			continue;
 
+		/* Looks like volume is corrupted */
 		ntfs_set_state(sbi, NTFS_DIRTY_ERROR);
 
-		if (!down_write_trylock(&wnd->rw_lock))
-			continue;
+		if (down_write_trylock(&wnd->rw_lock)) {
+			/* mark all zero bits as used in range [lcn, lcn+len) */
+			CLST i, lcn_f = 0, len_f = 0;
 
-		/* Find first free */
-		real_free = len;
-		while (real_free && !wnd_is_free(wnd, lcn, 1)) {
-			lcn += 1;
-			real_free -= 1;
-		}
+			err = 0;
+			for (i = 0; i < len; i++) {
+				if (wnd_is_free(wnd, lcn + i, 1)) {
+					if (!len_f)
+						lcn_f = lcn + i;
+					len_f += 1;
+				} else if (len_f) {
+					err = wnd_set_used(wnd, lcn_f, len_f);
+					len_f = 0;
+					if (err)
+						break;
+				}
+			}
 
-		if (!real_free) {
+			if (len_f)
+				err = wnd_set_used(wnd, lcn_f, len_f);
+
 			up_write(&wnd->rw_lock);
-			continue;
-		}
-
-		/* Find total free */
-		i = 1;
-		while (i < real_free && wnd_is_free(wnd, lcn + i, 1))
-			i += 1;
-
-		real_free = i;
-
-		err = wnd_set_used(wnd, lcn, real_free);
-		up_write(&wnd->rw_lock);
-
-		if (err)
-			return err;
-
-		if (len != real_free) {
-			len -= real_free + 1;
-			lcn += real_free + 1;
-			goto next;
+			if (err)
+				return err;
 		}
 	}
 
@@ -1109,7 +1100,7 @@ int run_get_highest_vcn(CLST vcn, const u8 *run_buf, u64 *highest_vcn)
 		run_buf += size_size + offset_size;
 		vcn64 += len;
 
-#ifndef NTFS3_64BIT_CLUSTER
+#ifndef CONFIG_NTFS3_64BIT_CLUSTER
 		if (vcn64 > 0x100000000ull)
 			return -EINVAL;
 #endif

@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  *
- * Copyright (C) 2019-2020 Paragon Software GmbH, All rights reserved.
+ * Copyright (C) 2019-2021 Paragon Software GmbH, All rights reserved.
  *
  *
  *                 terminology
  *
- * vcn - virtual cluster number - offset inside the file in clusters
- * vbo - virtual byte offset    - offset inside the file in bytes
- * lcn - logical cluster number - 0 based cluster in clusters heap
- * lbo - logical byte offset    - absolute position inside volume
- * run - maps vcn to lcn        - stored in attributes in packed form
- * attr - attribute segment     - std/name/data etc records inside MFT
- * mi  - mft inode              - one MFT record(usually 1024 bytes), consists of attributes
- * ni  - ntfs inode             - extends linux inode. consists of one or more mft inodes
+ * cluster - allocation unit     - 512,1K,2K,4K,...,2M
+ * vcn - virtual cluster number  - offset inside the file in clusters
+ * vbo - virtual byte offset     - offset inside the file in bytes
+ * lcn - logical cluster number  - 0 based cluster in clusters heap
+ * lbo - logical byte offset     - absolute position inside volume
+ * run - maps vcn to lcn         - stored in attributes in packed form
+ * attr - attribute segment      - std/name/data etc records inside MFT
+ * mi  - mft inode               - one MFT record(usually 1024 bytes or 4K), consists of attributes
+ * ni  - ntfs inode              - extends linux inode. consists of one or more mft inodes
+ * index - unit inside directory - 2K, 4K, <=page size, does not depend on cluster size
  *
+ * TODO: Implement
+ * https://docs.microsoft.com/en-us/windows/wsl/file-permissions
  */
 
 #include <linux/backing-dev.h>
@@ -78,26 +82,24 @@ void ntfs_inode_printk(struct inode *inode, const char *fmt, ...)
 	if (!___ratelimit(&sbi->msg_ratelimit, "ntfs3"))
 		return;
 
-	if (atomic_dec_and_test(&s_name_buf_cnt)) {
-		/* use static allocated buffer */
-		name = s_name_buf;
-	} else {
-		name = kmalloc(sizeof(s_name_buf), GFP_NOFS);
-	}
+	/* use static allocated buffer, if possible */
+	name = atomic_dec_and_test(&s_name_buf_cnt)
+		       ? s_name_buf
+		       : kmalloc(sizeof(s_name_buf), GFP_NOFS);
 
 	if (name) {
-		struct dentry *dentry = d_find_alias(inode);
+		struct dentry *de = d_find_alias(inode);
 		const u32 name_len = ARRAY_SIZE(s_name_buf) - 1;
 
-		if (dentry) {
-			spin_lock(&dentry->d_lock);
-			snprintf(name, name_len, "%s", dentry->d_name.name);
-			spin_unlock(&dentry->d_lock);
-			dput(dentry);
+		if (de) {
+			spin_lock(&de->d_lock);
+			snprintf(name, name_len, " \"%s\"", de->d_name.name);
+			spin_unlock(&de->d_lock);
 			name[name_len] = 0; /* to be sure*/
 		} else {
 			name[0] = 0;
 		}
+		dput(de); /* cocci warns if placed in branch "if (de)" */
 	}
 
 	va_start(args, fmt);
@@ -106,7 +108,7 @@ void ntfs_inode_printk(struct inode *inode, const char *fmt, ...)
 	vaf.fmt = printk_skip_level(fmt);
 	vaf.va = &args;
 
-	printk("%c%cntfs3: %s: ino=%lx, \"%s\" %pV\n", KERN_SOH_ASCII, level,
+	printk("%c%cntfs3: %s: ino=%lx,%s %pV\n", KERN_SOH_ASCII, level,
 	       sb->s_id, inode->i_ino, name ? name : "", &vaf);
 
 	va_end(args);
@@ -387,17 +389,13 @@ static int ntfs_remount(struct super_block *sb, int *flags, char *data)
 	if (err)
 		goto restore_opts;
 
-	ro_rw = 0;
-	if (sb_rdonly(sb) && !(*flags & SB_RDONLY)) {
-		/* ro -> rw */
-		ro_rw = 1;
-		if (sbi->flags & NTFS_FLAGS_NEED_REPLAY) {
-			ntfs_warn(
-				sb,
-				"Couldn't remount rw because journal is not replayed. Please umount/remount instead\n");
-			err = -EINVAL;
-			goto restore_opts;
-		}
+	ro_rw = sb_rdonly(sb) && !(*flags & SB_RDONLY);
+	if (ro_rw && (sbi->flags & NTFS_FLAGS_NEED_REPLAY)) {
+		ntfs_warn(
+			sb,
+			"Couldn't remount rw because journal is not replayed. Please umount/remount instead\n");
+		err = -EINVAL;
+		goto restore_opts;
 	}
 
 	sync_filesystem(sb);
@@ -468,7 +466,7 @@ static void init_once(void *foo)
 static noinline void put_ntfs(struct ntfs_sb_info *sbi)
 {
 	ntfs_free(sbi->new_rec);
-	ntfs_free(ntfs_put_shared(sbi->upcase));
+	ntfs_vfree(ntfs_put_shared(sbi->upcase));
 	ntfs_free(sbi->def_table);
 
 	wnd_close(&sbi->mft.bitmap);
@@ -540,13 +538,14 @@ static int ntfs_show_options(struct seq_file *m, struct dentry *root)
 	struct super_block *sb = root->d_sb;
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
 	struct ntfs_mount_options *opts = &sbi->options;
+	struct user_namespace *user_ns = seq_user_ns(m);
 
 	if (opts->uid)
 		seq_printf(m, ",uid=%u",
-			   from_kuid_munged(&init_user_ns, opts->fs_uid));
+			   from_kuid_munged(user_ns, opts->fs_uid));
 	if (opts->gid)
 		seq_printf(m, ",gid=%u",
-			   from_kgid_munged(&init_user_ns, opts->fs_gid));
+			   from_kgid_munged(user_ns, opts->fs_gid));
 	if (opts->fmask)
 		seq_printf(m, ",fmask=%04o", ~opts->fs_fmask_inv);
 	if (opts->dmask)
@@ -638,7 +637,7 @@ static struct inode *ntfs_export_get_inode(struct super_block *sb, u64 ino,
 	struct inode *inode;
 
 	ref.low = cpu_to_le32(ino);
-#ifdef NTFS3_64BIT_CLUSTER
+#ifdef CONFIG_NTFS3_64BIT_CLUSTER
 	ref.high = cpu_to_le16(ino >> 32);
 #else
 	ref.high = 0;
@@ -697,9 +696,9 @@ static u32 format_size_gb(const u64 bytes, u32 *mb)
 
 static u32 true_sectors_per_clst(const struct NTFS_BOOT *boot)
 {
-	return boot->sectors_per_clusters <= 0x80 ?
-		       boot->sectors_per_clusters :
-		       (1u << (0 - boot->sectors_per_clusters));
+	return boot->sectors_per_clusters <= 0x80
+		       ? boot->sectors_per_clusters
+		       : (1u << (0 - boot->sectors_per_clusters));
 }
 
 /* inits internal info from on-disk boot sector*/
@@ -795,10 +794,10 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 
 	sbi->cluster_mask = sbi->cluster_size - 1;
 	sbi->cluster_mask_inv = ~(u64)sbi->cluster_mask;
-	sbi->record_size = record_size = boot->record_size < 0 ?
-						 1 << (-boot->record_size) :
-						 (u32)boot->record_size
-							 << sbi->cluster_bits;
+	sbi->record_size = record_size = boot->record_size < 0
+						 ? 1 << (-boot->record_size)
+						 : (u32)boot->record_size
+							   << sbi->cluster_bits;
 
 	if (record_size > MAXIMUM_BYTES_PER_MFT)
 		goto out;
@@ -811,9 +810,9 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 		QuadAlign(((record_size >> SECTOR_SHIFT) * sizeof(short))) -
 		QuadAlign(sizeof(enum ATTR_TYPE));
 
-	sbi->index_size = boot->index_size < 0 ?
-				  1u << (-boot->index_size) :
-				  (u32)boot->index_size << sbi->cluster_bits;
+	sbi->index_size = boot->index_size < 0
+				  ? 1u << (-boot->index_size)
+				  : (u32)boot->index_size << sbi->cluster_bits;
 
 	sbi->volume.ser_num = le64_to_cpu(boot->serial_num);
 	sbi->volume.size = sectors << sbi->sector_bits;
@@ -831,11 +830,7 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 	}
 
 	clusters = sbi->volume.size >> sbi->cluster_bits;
-#ifdef NTFS3_64BIT_CLUSTER
-#if BITS_PER_LONG < 64
-#error "NTFS3_64BIT_CLUSTER incompatible in 32 bit OS"
-#endif
-#else
+#ifndef CONFIG_NTFS3_64BIT_CLUSTER
 	/* 32 bits per cluster */
 	if (clusters >> 32) {
 		ntfs_notice(
@@ -844,6 +839,8 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 			gb, mb);
 		goto out;
 	}
+#elif BITS_PER_LONG < 64
+#error "CONFIG_NTFS3_64BIT_CLUSTER incompatible in 32 bit OS"
 #endif
 
 	sbi->used.bitmap.nbits = clusters;
@@ -875,7 +872,7 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 	/* Maximum size for normal files */
 	sbi->maxbytes = (clusters << sbi->cluster_bits) - 1;
 
-#ifdef NTFS3_64BIT_CLUSTER
+#ifdef CONFIG_NTFS3_64BIT_CLUSTER
 	if (clusters >= (1ull << (64 - sbi->cluster_bits)))
 		sbi->maxbytes = -1;
 	sbi->maxbytes_sparse = -1;
@@ -927,7 +924,6 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_export_op = &ntfs_export_ops;
 	sb->s_time_gran = NTFS_TIME_GRAN; // 100 nsec
 	sb->s_xattr = ntfs_xattr_handlers;
-	sb->s_maxbytes = MAX_LFS_FILESIZE;
 
 	ratelimit_state_init(&sbi->msg_ratelimit, DEFAULT_RATELIMIT_INTERVAL,
 			     DEFAULT_RATELIMIT_BURST);
@@ -952,6 +948,12 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (err)
 		goto out;
 
+#ifdef CONFIG_NTFS3_64BIT_CLUSTER
+	sb->s_maxbytes = MAX_LFS_FILESIZE;
+#else
+	sb->s_maxbytes = 0xFFFFFFFFull << sbi->cluster_bits;
+#endif
+
 	mutex_init(&sbi->compress.mtx_lznt);
 #ifdef CONFIG_NTFS3_LZX_XPRESS
 	mutex_init(&sbi->compress.mtx_xpress);
@@ -959,7 +961,7 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 #endif
 
 	/*
-	 * Load $Volume. This should be done before $LogFile
+	 * Load $Volume. This should be done before LogFile
 	 * 'cause 'sbi->volume.ni' is used 'ntfs_set_state'
 	 */
 	ref.low = cpu_to_le32(MFT_REC_VOL);
@@ -1028,13 +1030,13 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	iput(inode);
 
-	/* Load $LogFile to replay */
+	/* Load LogFile to replay */
 	ref.low = cpu_to_le32(MFT_REC_LOG);
 	ref.seq = cpu_to_le16(MFT_REC_LOG);
 	inode = ntfs_iget5(sb, &ref, &NAME_LOGFILE);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
-		ntfs_err(sb, "Failed to load $LogFile.");
+		ntfs_err(sb, "Failed to load \x24LogFile.");
 		inode = NULL;
 		goto out;
 	}
@@ -1133,7 +1135,7 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	ni = ntfs_i(inode);
 
-#ifndef NTFS3_64BIT_CLUSTER
+#ifndef CONFIG_NTFS3_64BIT_CLUSTER
 	if (inode->i_size >> 32) {
 		err = -EINVAL;
 		goto out;
@@ -1204,15 +1206,19 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 	sbi->def_entries = 1;
 	done = sizeof(struct ATTR_DEF_ENTRY);
 	sbi->reparse.max_size = MAXIMUM_REPARSE_DATA_BUFFER_SIZE;
+	sbi->ea_max_size = 0x10000; /* default formater value */
 
 	while (done + sizeof(struct ATTR_DEF_ENTRY) <= bytes) {
 		u32 t32 = le32_to_cpu(t->type);
+		u64 sz = le64_to_cpu(t->max_sz);
 
 		if ((t32 & 0xF) || le32_to_cpu(t[-1].type) >= t32)
 			break;
 
 		if (t->type == ATTR_REPARSE)
-			sbi->reparse.max_size = le64_to_cpu(t->max_sz);
+			sbi->reparse.max_size = sz;
+		else if (t->type == ATTR_EA)
+			sbi->ea_max_size = sz;
 
 		done += sizeof(struct ATTR_DEF_ENTRY);
 		t += 1;
@@ -1226,7 +1232,7 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 	inode = ntfs_iget5(sb, &ref, &NAME_UPCASE);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
-		ntfs_err(sb, "Failed to load $LogFile.");
+		ntfs_err(sb, "Failed to load \x24LogFile.");
 		inode = NULL;
 		goto out;
 	}
@@ -1238,7 +1244,7 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 		goto out;
 	}
 
-	sbi->upcase = upcase = ntfs_malloc(0x10000 * sizeof(short));
+	sbi->upcase = upcase = ntfs_vmalloc(0x10000 * sizeof(short));
 	if (!upcase) {
 		err = -ENOMEM;
 		goto out;
@@ -1268,7 +1274,7 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 	shared = ntfs_set_shared(upcase, 0x10000 * sizeof(short));
 	if (shared && upcase != shared) {
 		sbi->upcase = shared;
-		ntfs_free(upcase);
+		ntfs_vfree(upcase);
 	}
 
 	iput(inode);
@@ -1297,7 +1303,6 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 	}
 
 load_root:
-
 	/* Load root */
 	ref.low = cpu_to_le32(MFT_REC_ROOT);
 	ref.seq = cpu_to_le16(MFT_REC_ROOT);
@@ -1420,26 +1425,25 @@ static int __init init_ntfs_fs(void)
 {
 	int err;
 
-#ifdef NTFS3_INDEX_BINARY_SEARCH
-	pr_notice("ntfs3: +index binary search\n");
-#endif
+	pr_notice("ntfs3: Index binary search\n");
+	pr_notice("ntfs3: Hot fix free clusters\n");
+	pr_notice("ntfs3: Max link count %u\n", NTFS_LINK_MAX);
 
-#ifdef NTFS3_CHECK_FREE_CLST
-	pr_notice("ntfs3: +check free clusters\n");
+#ifdef CONFIG_NTFS3_FS_POSIX_ACL
+	pr_notice("ntfs3: Enabled Linux POSIX ACLs support\n");
 #endif
-
-#if NTFS_LINK_MAX < 0xffff
-	pr_notice("ntfs3: max link count %u\n", NTFS_LINK_MAX);
-#endif
-
-#ifdef NTFS3_64BIT_CLUSTER
-	pr_notice("ntfs3: 64 bits per cluster\n");
+#ifdef CONFIG_NTFS3_64BIT_CLUSTER
+	pr_notice("ntfs3: Activated 64 bits per cluster\n");
 #else
-	pr_notice("ntfs3: 32 bits per cluster\n");
+	pr_notice("ntfs3: Activated 32 bits per cluster\n");
 #endif
 #ifdef CONFIG_NTFS3_LZX_XPRESS
-	pr_notice("ntfs3: read-only lzx/xpress compression included\n");
+	pr_notice("ntfs3: Read-only lzx/xpress compression included\n");
 #endif
+
+	err = ntfs3_init_bitmap();
+	if (err)
+		return err;
 
 	ntfs_inode_cachep = kmem_cache_create(
 		"ntfs_inode_cache", sizeof(struct ntfs_inode), 0,
@@ -1447,16 +1451,18 @@ static int __init init_ntfs_fs(void)
 		init_once);
 	if (!ntfs_inode_cachep) {
 		err = -ENOMEM;
-		goto failed;
+		goto out1;
 	}
 
 	err = register_filesystem(&ntfs_fs_type);
-	if (!err)
-		return 0;
+	if (err)
+		goto out;
 
+	return 0;
+out:
 	kmem_cache_destroy(ntfs_inode_cachep);
-
-failed:
+out1:
+	ntfs3_exit_bitmap();
 	return err;
 }
 
@@ -1468,10 +1474,25 @@ static void __exit exit_ntfs_fs(void)
 	}
 
 	unregister_filesystem(&ntfs_fs_type);
+	ntfs3_exit_bitmap();
 }
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("ntfs3 filesystem");
+MODULE_DESCRIPTION("ntfs3 read/write filesystem");
+MODULE_INFO(behaviour, "Index binary search");
+MODULE_INFO(behaviour, "Hot fix free clusters");
+#ifdef CONFIG_NTFS3_FS_POSIX_ACL
+MODULE_INFO(behaviour, "Enabled Linux POSIX ACLs support");
+#endif
+#ifdef CONFIG_NTFS3_64BIT_CLUSTER
+MODULE_INFO(cluster, "Activated 64 bits per cluster");
+#else
+MODULE_INFO(cluster, "Activated 32 bits per cluster");
+#endif
+#ifdef CONFIG_NTFS3_LZX_XPRESS
+MODULE_INFO(compression, "Read-only lzx/xpress compression included");
+#endif
+
 MODULE_AUTHOR("Konstantin Komarov");
 MODULE_ALIAS_FS("ntfs3");
 
