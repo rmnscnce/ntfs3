@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  *
- * Copyright (C) 2019-2020 Paragon Software GmbH, All rights reserved.
+ * Copyright (C) 2019-2021 Paragon Software GmbH, All rights reserved.
  *
  * TODO: merge attr_set_size/attr_data_get_block/attr_allocate_frame?
  */
@@ -458,12 +458,12 @@ again:
 	is_ext = is_attr_ext(attr_b);
 
 again_1:
+	align = sbi->cluster_size;
+
 	if (is_ext) {
-		align = 1u << (attr_b->nres.c_unit + cluster_bits);
+		align <<= attr_b->nres.c_unit;
 		if (is_attr_sparsed(attr_b))
 			keep_prealloc = false;
-	} else {
-		align = sbi->cluster_size;
 	}
 
 	old_valid = le64_to_cpu(attr_b->nres.valid_size);
@@ -579,8 +579,8 @@ add_alloc_in_same_attr_seg:
 			err = attr_allocate_clusters(
 				sbi, run, vcn, lcn, to_allocate, &pre_alloc,
 				is_mft ? ALLOCATE_MFT : 0, &alen,
-				is_mft ? 0 :
-					 (sbi->record_size -
+				is_mft ? 0
+				       : (sbi->record_size -
 					  le32_to_cpu(rec->used) + 8) /
 							 3 +
 						 1,
@@ -831,7 +831,7 @@ int attr_data_get_block(struct ntfs_inode *ni, CLST vcn, CLST clen, CLST *lcn,
 	struct ATTR_LIST_ENTRY *le, *le_b;
 	struct mft_inode *mi, *mi_b;
 	CLST hint, svcn, to_alloc, evcn1, next_svcn, asize, end;
-	u64 new_size, total_size;
+	u64 total_size;
 	u32 clst_per_frame;
 	bool ok;
 
@@ -855,7 +855,6 @@ int attr_data_get_block(struct ntfs_inode *ni, CLST vcn, CLST clen, CLST *lcn,
 
 	sbi = ni->mi.sbi;
 	cluster_bits = sbi->cluster_bits;
-	new_size = ((u64)vcn + clen) << cluster_bits;
 
 	ni_lock(ni);
 	down_write(&ni->file.run_lock);
@@ -923,7 +922,6 @@ int attr_data_get_block(struct ntfs_inode *ni, CLST vcn, CLST clen, CLST *lcn,
 
 		if (ok && clen > *len) {
 			clen = *len;
-			new_size = ((u64)vcn + clen) << cluster_bits;
 			to_alloc = (clen + clst_per_frame - 1) &
 				   ~(clst_per_frame - 1);
 		}
@@ -1720,17 +1718,16 @@ int attr_collapse_range(struct ntfs_inode *ni, u64 vbo, u64 bytes)
 
 	if (is_attr_ext(attr_b)) {
 		total_size = le64_to_cpu(attr_b->nres.total_size);
-		mask = (1u << (attr_b->nres.c_unit + sbi->cluster_bits)) - 1;
+		mask = (sbi->cluster_size << attr_b->nres.c_unit) - 1;
 	} else {
 		total_size = alloc_size;
 		mask = sbi->cluster_mask;
 	}
 
-	if (vbo & mask)
+	if ((vbo & mask) || (bytes & mask)) {
+		/* allow to collapse only cluster aligned ranges */
 		return -EINVAL;
-
-	if (bytes & mask)
-		return -EINVAL;
+	}
 
 	if (vbo > data_size)
 		return -EINVAL;

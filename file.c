@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  *
- * Copyright (C) 2019-2020 Paragon Software GmbH, All rights reserved.
+ * Copyright (C) 2019-2021 Paragon Software GmbH, All rights reserved.
  *
  *  regular file handling primitives for ntfs-based filesystems
  */
@@ -76,8 +76,8 @@ static long ntfs_compat_ioctl(struct file *filp, u32 cmd, unsigned long arg)
 /*
  * inode_operations::getattr
  */
-int ntfs_getattr(const struct path *path, struct kstat *stat, u32 request_mask,
-		 u32 flags)
+int ntfs_getattr(struct user_namespace *mnt_userns, const struct path *path,
+		 struct kstat *stat, u32 request_mask, u32 flags)
 {
 	struct inode *inode = d_inode(path->dentry);
 	struct ntfs_inode *ni = ntfs_i(inode);
@@ -90,7 +90,7 @@ int ntfs_getattr(const struct path *path, struct kstat *stat, u32 request_mask,
 
 	stat->attributes_mask |= STATX_ATTR_COMPRESSED | STATX_ATTR_ENCRYPTED;
 
-	generic_fillattr(inode, stat);
+	generic_fillattr(mnt_userns, inode, stat);
 
 	stat->result_mask |= STATX_BTIME;
 	stat->btime = ni->i_crtime;
@@ -226,8 +226,8 @@ void ntfs_sparse_cluster(struct inode *inode, struct page *page0, CLST vcn,
 			continue;
 
 		page_off = (loff_t)idx << PAGE_SHIFT;
-		to = (page_off + PAGE_SIZE) > end ? (end - page_off) :
-						    PAGE_SIZE;
+		to = (page_off + PAGE_SIZE) > end ? (end - page_off)
+						  : PAGE_SIZE;
 		partial = false;
 
 		if ((from || PAGE_SIZE != to) &&
@@ -396,10 +396,8 @@ out:
 static int ntfs_truncate(struct inode *inode, loff_t new_size)
 {
 	struct super_block *sb = inode->i_sb;
-	struct ntfs_sb_info *sbi = sb->s_fs_info;
 	struct ntfs_inode *ni = ntfs_i(inode);
 	int err, dirty = 0;
-	u32 vcn;
 	u64 new_valid;
 
 	if (!S_ISREG(inode->i_mode))
@@ -415,7 +413,6 @@ static int ntfs_truncate(struct inode *inode, loff_t new_size)
 			return err;
 	}
 
-	vcn = bytes_to_cluster(sbi, new_size);
 	new_valid = ntfs_up_block(sb, min_t(u64, ni->i_valid, new_size));
 
 	ni_lock(ni);
@@ -584,7 +581,7 @@ static long ntfs_fallocate(struct file *file, int mode, loff_t vbo, loff_t len)
 				 * 1G of sparsed clusters + 1 cluster of data =>
 				 * valid_size == 1G + 1 cluster
 				 * fallocate(1G) will zero 1G and this can be very long
-				 * xfstest 016/086 will fail whithout 'ntfs_sparse_cluster'
+				 * xfstest 016/086 will fail without 'ntfs_sparse_cluster'
 				 */
 				/*ntfs_sparse_cluster(inode, NULL, vcn,
 				 *		    min(vcn_v - vcn, clen));
@@ -617,7 +614,8 @@ out:
 /*
  * inode_operations::setattr
  */
-int ntfs3_setattr(struct dentry *dentry, struct iattr *attr)
+int ntfs3_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
+		  struct iattr *attr)
 {
 	struct super_block *sb = dentry->d_sb;
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
@@ -635,7 +633,7 @@ int ntfs3_setattr(struct dentry *dentry, struct iattr *attr)
 		ia_valid = attr->ia_valid;
 	}
 
-	err = setattr_prepare(dentry, attr);
+	err = setattr_prepare(mnt_userns, dentry, attr);
 	if (err)
 		goto out;
 
@@ -660,10 +658,10 @@ int ntfs3_setattr(struct dentry *dentry, struct iattr *attr)
 		ni->ni_flags |= NI_FLAG_UPDATE_PARENT;
 	}
 
-	setattr_copy(inode, attr);
+	setattr_copy(mnt_userns, inode, attr);
 
 	if (mode != inode->i_mode) {
-		err = ntfs_acl_chmod(inode);
+		err = ntfs_acl_chmod(mnt_userns, inode);
 		if (err)
 			goto out;
 
@@ -912,10 +910,10 @@ static ssize_t ntfs_compress_write(struct kiocb *iocb, struct iov_iter *from)
 			size_t cp, tail = PAGE_SIZE - off;
 
 			page = pages[ip];
-			cp = iov_iter_copy_from_user_atomic(page, from, off,
-							    min(tail, bytes));
+			cp = copy_page_from_iter_atomic(page, off,
+							min(tail, bytes), from);
 			flush_dcache_page(page);
-			iov_iter_advance(from, cp);
+
 			copied += cp;
 			bytes -= cp;
 			if (!bytes || !cp)
@@ -1018,8 +1016,8 @@ static ssize_t ntfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (ret)
 		goto out;
 
-	ret = is_compressed(ni) ? ntfs_compress_write(iocb, from) :
-				  __generic_file_write_iter(iocb, from);
+	ret = is_compressed(ni) ? ntfs_compress_write(iocb, from)
+				: __generic_file_write_iter(iocb, from);
 
 out:
 	inode_unlock(inode);

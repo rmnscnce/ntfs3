@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  *
- * Copyright (C) 2019-2020 Paragon Software GmbH, All rights reserved.
+ * Copyright (C) 2019-2021 Paragon Software GmbH, All rights reserved.
  *
  * on-disk ntfs structs
  */
@@ -36,7 +36,7 @@
  * Logical and virtual cluster number
  * If needed, may be redefined to use 64 bit value
  */
-//#define NTFS3_64BIT_CLUSTER
+//#define CONFIG_NTFS3_64BIT_CLUSTER
 
 #define NTFS_LZNT_MAX_CLUSTER	4096
 #define NTFS_LZNT_CUNIT		4
@@ -64,12 +64,12 @@ struct cpu_str {
 struct le_str {
 	u8 len;
 	u8 unused;
-	__le16 name[1];
+	__le16 name[];
 };
 
 static_assert(SECTOR_SHIFT == 9);
 
-#ifdef NTFS3_64BIT_CLUSTER
+#ifdef CONFIG_NTFS3_64BIT_CLUSTER
 typedef u64 CLST;
 static_assert(sizeof(size_t) == 8);
 #else
@@ -187,7 +187,7 @@ static_assert(sizeof(__le64) == sizeof(struct MFT_REF));
 
 static inline CLST ino_get(const struct MFT_REF *ref)
 {
-#ifdef NTFS3_64BIT_CLUSTER
+#ifdef CONFIG_NTFS3_64BIT_CLUSTER
 	return le32_to_cpu(ref->low) | ((u64)le16_to_cpu(ref->high) << 32);
 #else
 	return le32_to_cpu(ref->low);
@@ -285,7 +285,7 @@ struct MFT_REC {
 
 	__le16 res;		// 0x2A: High part of mft record?
 	__le32 mft_record;	// 0x2C: Current mft record number
-	__le16 fixups[1];	// 0x30:
+	__le16 fixups[];	// 0x30:
 };
 
 #define MFTRECORD_FIXUP_OFFSET_1 offsetof(struct MFT_REC, res)
@@ -425,7 +425,7 @@ static inline bool is_attr_indexed(const struct ATTRIB *attr)
 	return !attr->non_res && (attr->res.flags & RESIDENT_FLAG_INDEXED);
 }
 
-static const inline __le16 *attr_name(const struct ATTRIB *attr)
+static inline __le16 const *attr_name(const struct ATTRIB *attr)
 {
 	return Add2Ptr(attr, le16_to_cpu(attr->name_off));
 }
@@ -542,7 +542,7 @@ static inline int le_cmp(const struct ATTR_LIST_ENTRY *le,
 		       le->name_len * sizeof(short)));
 }
 
-static const inline __le16 *le_name(const struct ATTR_LIST_ENTRY *le)
+static inline __le16 const *le_name(const struct ATTR_LIST_ENTRY *le)
 {
 	return Add2Ptr(le, le->name_off);
 }
@@ -572,7 +572,7 @@ struct ATTR_FILE_NAME {
 	struct NTFS_DUP_INFO dup;// 0x08
 	u8 name_len;		// 0x40: File name length in words
 	u8 type;		// 0x41: File name type
-	__le16 name[1];		// 0x42: File name
+	__le16 name[];		// 0x42: File name
 };
 
 static_assert(sizeof(((struct ATTR_FILE_NAME *)NULL)->dup) == 0x38);
@@ -587,6 +587,7 @@ static inline struct ATTRIB *attr_from_name(struct ATTR_FILE_NAME *fname)
 
 static inline u16 fname_full_size(const struct ATTR_FILE_NAME *fname)
 {
+	// don't return struct_size(fname, name, fname->name_len);
 	return offsetof(struct ATTR_FILE_NAME, name) +
 	       fname->name_len * sizeof(short);
 }
@@ -792,7 +793,7 @@ struct INDEX_ROOT {
 	enum ATTR_TYPE type;	// 0x00: The type of attribute to index on
 	enum COLLATION_RULE rule; // 0x04: The rule
 	__le32 index_block_size;// 0x08: The size of index record
-	u8 index_block_clst;	// 0x0C: The number of clusters per index
+	u8 index_block_clst;	// 0x0C: The number of clusters or sectors per index
 	u8 res[3];
 	struct INDEX_HDR ihdr;	// 0x10:
 };
@@ -1137,7 +1138,7 @@ struct REPARSE_DATA_BUFFER {
 			__le16 SubstituteNameLength; // 0x0A
 			__le16 PrintNameOffset;      // 0x0C
 			__le16 PrintNameLength;      // 0x0E
-			__le16 PathBuffer[1];	     // 0x10
+			__le16 PathBuffer[];	     // 0x10
 		} MountPointReparseBuffer;
 
 		// If ReparseTag == 0xA000000C (IO_REPARSE_TAG_SYMLINK)
@@ -1149,7 +1150,7 @@ struct REPARSE_DATA_BUFFER {
 			__le16 PrintNameLength;      // 0x0E
 			// 0-absolute path 1- relative path, SYMLINK_FLAG_RELATIVE
 			__le32 Flags;		     // 0x10
-			__le16 PathBuffer[1];	     // 0x14
+			__le16 PathBuffer[];	     // 0x14
 		} SymbolicLinkReparseBuffer;
 
 		// If ReparseTag == 0x80000017U
@@ -1189,14 +1190,13 @@ struct EA_FULL {
 	u8 flags;		// 0x04
 	u8 name_len;		// 0x05
 	__le16 elength;		// 0x06
-	u8 name[1];		// 0x08
+	u8 name[];		// 0x08
 };
 
 static_assert(offsetof(struct EA_FULL, name) == 8);
 
-#define MAX_EA_DATA_SIZE (256 * 1024)
-
-#define ACL_REVISION 2
+#define ACL_REVISION	2
+#define ACL_REVISION_DS 4
 
 #define SE_SELF_RELATIVE cpu_to_le16(0x8000)
 
@@ -1231,7 +1231,7 @@ struct SID {
 	u8 Revision;
 	u8 SubAuthorityCount;
 	u8 IdentifierAuthority[6];
-	__le32 SubAuthority[1];
+	__le32 SubAuthority[];
 };
 static_assert(offsetof(struct SID, SubAuthority) == 8);
 

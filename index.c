@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  *
- * Copyright (C) 2019-2020 Paragon Software GmbH, All rights reserved.
+ * Copyright (C) 2019-2021 Paragon Software GmbH, All rights reserved.
  *
  */
 
@@ -28,12 +28,14 @@ static const struct INDEX_NAMES {
  * if l1 != 0
  *   both names are little endian on-disk ATTR_FILE_NAME structs
  * else
- *   f1 - cpu_str, f2 - ATTR_FILE_NAME
+ *   key1 - cpu_str, key2 - ATTR_FILE_NAME
  */
-static int cmp_fnames(const struct ATTR_FILE_NAME *f1, size_t l1,
-		      const struct ATTR_FILE_NAME *f2, size_t l2,
-		      const struct ntfs_sb_info *sbi)
+static int cmp_fnames(const void *key1, size_t l1, const void *key2, size_t l2,
+		      const void *data)
 {
+	const struct ATTR_FILE_NAME *f2 = key2;
+	const struct ntfs_sb_info *sbi = data;
+	const struct ATTR_FILE_NAME *f1;
 	u16 fsize2;
 	bool both_case;
 
@@ -46,24 +48,27 @@ static int cmp_fnames(const struct ATTR_FILE_NAME *f1, size_t l1,
 
 	both_case = f2->type != FILE_NAME_DOS /*&& !sbi->options.nocase*/;
 	if (!l1) {
-		const struct cpu_str *s1 = (struct cpu_str *)f1;
 		const struct le_str *s2 = (struct le_str *)&f2->name_len;
 
 		/*
 		 * If names are equal (case insensitive)
 		 * try to compare it case sensitive
 		 */
-		return ntfs_cmp_names_cpu(s1, s2, sbi->upcase, both_case);
+		return ntfs_cmp_names_cpu(key1, s2, sbi->upcase, both_case);
 	}
 
+	f1 = key1;
 	return ntfs_cmp_names(f1->name, f1->name_len, f2->name, f2->name_len,
 			      sbi->upcase, both_case);
 }
 
 /* $SII of $Secure and $Q of Quota */
-static int cmp_uint(const u32 *k1, size_t l1, const u32 *k2, size_t l2,
-		    const void *p)
+static int cmp_uint(const void *key1, size_t l1, const void *key2, size_t l2,
+		    const void *data)
 {
+	const u32 *k1 = key1;
+	const u32 *k2 = key2;
+
 	if (l2 < sizeof(u32))
 		return -1;
 
@@ -75,9 +80,11 @@ static int cmp_uint(const u32 *k1, size_t l1, const u32 *k2, size_t l2,
 }
 
 /* $SDH of $Secure */
-static int cmp_sdh(const struct SECURITY_KEY *k1, size_t l1,
-		   const struct SECURITY_KEY *k2, size_t l2, const void *p)
+static int cmp_sdh(const void *key1, size_t l1, const void *key2, size_t l2,
+		   const void *data)
 {
+	const struct SECURITY_KEY *k1 = key1;
+	const struct SECURITY_KEY *k2 = key2;
 	u32 t1, t2;
 
 	if (l2 < sizeof(struct SECURITY_KEY))
@@ -93,7 +100,7 @@ static int cmp_sdh(const struct SECURITY_KEY *k1, size_t l1,
 		return 1;
 
 	/* Second value is security Id */
-	if (p) {
+	if (data) {
 		t1 = le32_to_cpu(k1->sec_id);
 		t2 = le32_to_cpu(k2->sec_id);
 		if (t1 < t2)
@@ -106,12 +113,14 @@ static int cmp_sdh(const struct SECURITY_KEY *k1, size_t l1,
 }
 
 /* $O of ObjId and "$R" for Reparse */
-static int cmp_uints(const __le32 *k1, size_t l1, const __le32 *k2, size_t l2,
-		     const void *p)
+static int cmp_uints(const void *key1, size_t l1, const void *key2, size_t l2,
+		     const void *data)
 {
+	const __le32 *k1 = key1;
+	const __le32 *k2 = key2;
 	size_t count;
 
-	if ((size_t)p == 1) {
+	if ((size_t)data == 1) {
 		/*
 		 * ni_delete_all -> ntfs_remove_reparse -> delete all with this reference
 		 * k1, k2 - pointers to REPARSE_KEY
@@ -153,16 +162,16 @@ static inline NTFS_CMP_FUNC get_cmp_func(const struct INDEX_ROOT *root)
 	switch (root->type) {
 	case ATTR_NAME:
 		if (root->rule == NTFS_COLLATION_TYPE_FILENAME)
-			return (NTFS_CMP_FUNC)&cmp_fnames;
+			return &cmp_fnames;
 		break;
 	case ATTR_ZERO:
 		switch (root->rule) {
 		case NTFS_COLLATION_TYPE_UINT:
-			return (NTFS_CMP_FUNC)&cmp_uint;
+			return &cmp_uint;
 		case NTFS_COLLATION_TYPE_SECURITY_HASH:
-			return (NTFS_CMP_FUNC)&cmp_sdh;
+			return &cmp_sdh;
 		case NTFS_COLLATION_TYPE_UINTS:
-			return (NTFS_CMP_FUNC)&cmp_uints;
+			return &cmp_uints;
 		default:
 			break;
 		}
@@ -415,9 +424,8 @@ next_run:
 		if (vbo + blocksize > data_size)
 			nbits = 8 * (data_size - vbo);
 
-		ok = nbits > from ?
-			     (*fn)((ulong *)bh->b_data, from, nbits, ret) :
-			     false;
+		ok = nbits > from ? (*fn)((ulong *)bh->b_data, from, nbits, ret)
+				  : false;
 		put_bh(bh);
 
 		if (ok) {
@@ -543,7 +551,7 @@ int indx_used_bit(struct ntfs_index *indx, struct ntfs_inode *ni, size_t *bit)
  * be split.
  * NOTE: This function should never return 'END' entry NULL returns on error
  */
-static const inline struct NTFS_DE *hdr_find_split(const struct INDEX_HDR *hdr)
+static const struct NTFS_DE *hdr_find_split(const struct INDEX_HDR *hdr)
 {
 	size_t o;
 	const struct NTFS_DE *e = hdr_first_de(hdr);
@@ -574,8 +582,8 @@ static const inline struct NTFS_DE *hdr_find_split(const struct INDEX_HDR *hdr)
  * inserts some entries at the beginning of the buffer.
  * It is used to insert entries into a newly-created buffer.
  */
-static const inline struct NTFS_DE *
-hdr_insert_head(struct INDEX_HDR *hdr, const void *ins, u32 ins_bytes)
+static const struct NTFS_DE *hdr_insert_head(struct INDEX_HDR *hdr,
+					     const void *ins, u32 ins_bytes)
 {
 	u32 to_move;
 	struct NTFS_DE *e = hdr_first_de(hdr);
@@ -1397,8 +1405,8 @@ static int indx_create_allocate(struct ntfs_index *indx, struct ntfs_inode *ni,
 	struct ntfs_sb_info *sbi = ni->mi.sbi;
 	struct ATTRIB *bitmap;
 	struct ATTRIB *alloc;
-	u32 alloc_size = ntfs_up_cluster(sbi, 1u << indx->index_bits);
-	u32 bmp_size = QuadAlign(((alloc_size >> indx->index_bits) + 7) >> 3);
+	u32 data_size = 1u << indx->index_bits;
+	u32 alloc_size = ntfs_up_cluster(sbi, data_size);
 	CLST len = alloc_size >> sbi->cluster_bits;
 	const struct INDEX_NAMES *in = &s_index_names[indx->type];
 	CLST alen;
@@ -1416,17 +1424,21 @@ static int indx_create_allocate(struct ntfs_index *indx, struct ntfs_inode *ni,
 	if (err)
 		goto out1;
 
-	err = ni_insert_resident(ni, bmp_size, ATTR_BITMAP, in->name,
+	alloc->nres.valid_size = alloc->nres.data_size = cpu_to_le64(data_size);
+
+	err = ni_insert_resident(ni, bitmap_size(1), ATTR_BITMAP, in->name,
 				 in->name_len, &bitmap, NULL);
 	if (err)
 		goto out2;
 
+	if (in->name == I30_NAME) {
+		ni->vfs_inode.i_size = data_size;
+		inode_set_bytes(&ni->vfs_inode, alloc_size);
+	}
+
 	memcpy(&indx->alloc_run, &run, sizeof(run));
 
 	*vbn = 0;
-
-	if (in->name == I30_NAME)
-		ni->vfs_inode.i_size = alloc_size;
 
 	return 0;
 
@@ -1450,7 +1462,7 @@ static int indx_add_allocate(struct ntfs_index *indx, struct ntfs_inode *ni,
 {
 	int err;
 	size_t bit;
-	u64 data_size, alloc_size;
+	u64 data_size;
 	u64 bmp_size, bmp_size_v;
 	struct ATTRIB *bmp, *alloc;
 	struct mft_inode *mi;
@@ -1474,15 +1486,12 @@ static int indx_add_allocate(struct ntfs_index *indx, struct ntfs_inode *ni,
 	}
 
 	data_size = (u64)(bit + 1) << indx->index_bits;
-	alloc_size = ntfs_up_cluster(ni->mi.sbi, data_size);
 
 	if (bmp) {
-		u64 bits = ((alloc_size >> indx->index_bits) + 7) >> 3;
-
 		/* Increase bitmap */
 		err = attr_set_size(ni, ATTR_BITMAP, in->name, in->name_len,
-				    &indx->bitmap_run, QuadAlign(bits), NULL,
-				    true, NULL);
+				    &indx->bitmap_run, bitmap_size(bit + 1),
+				    NULL, true, NULL);
 		if (err)
 			goto out1;
 	}
@@ -1495,23 +1504,14 @@ static int indx_add_allocate(struct ntfs_index *indx, struct ntfs_inode *ni,
 		goto out1;
 	}
 
-	if (alloc_size > le64_to_cpu(alloc->nres.alloc_size)) {
-		/* Increase allocation */
-		err = attr_set_size(ni, ATTR_ALLOC, in->name, in->name_len,
-				    &indx->alloc_run, alloc_size, &alloc_size,
-				    true, NULL);
-		if (err) {
-			if (bmp)
-				goto out2;
-			goto out1;
-		}
-
-		if (in->name == I30_NAME)
-			ni->vfs_inode.i_size = alloc_size;
-	} else if (data_size > le64_to_cpu(alloc->nres.data_size)) {
-		alloc->nres.data_size = alloc->nres.valid_size =
-			cpu_to_le64(data_size);
-		mi->dirty = true;
+	/* Increase allocation */
+	err = attr_set_size(ni, ATTR_ALLOC, in->name, in->name_len,
+			    &indx->alloc_run, data_size, &data_size, true,
+			    NULL);
+	if (err) {
+		if (bmp)
+			goto out2;
+		goto out1;
 	}
 
 	*vbn = bit << indx->idx2vbn_bits;
@@ -1548,10 +1548,9 @@ static int indx_insert_into_root(struct ntfs_index *indx, struct ntfs_inode *ni,
 	CLST new_vbn;
 	__le64 *sub_vbn, t_vbn;
 	u16 new_de_size;
-	u32 hdr_used, hdr_total, asize, tail, used, aoff, to_move;
+	u32 hdr_used, hdr_total, asize, used, to_move;
 	u32 root_size, new_root_size;
 	struct ntfs_sb_info *sbi;
-	char *next;
 	int ds_root;
 	struct INDEX_ROOT *root, *a_root = NULL;
 
@@ -1567,30 +1566,23 @@ static int indx_insert_into_root(struct ntfs_index *indx, struct ntfs_inode *ni,
 	hdr = &root->ihdr;
 	sbi = ni->mi.sbi;
 	rec = mi->mrec;
-	aoff = PtrOffset(rec, attr);
 	used = le32_to_cpu(rec->used);
 	new_de_size = le16_to_cpu(new_de->size);
 	hdr_used = le32_to_cpu(hdr->used);
 	hdr_total = le32_to_cpu(hdr->total);
 	asize = le32_to_cpu(attr->size);
-	next = Add2Ptr(attr, asize);
-	tail = used - aoff - asize;
 	root_size = le32_to_cpu(attr->res.data_size);
 
 	ds_root = new_de_size + hdr_used - hdr_total;
 
 	if (used + ds_root < sbi->max_bytes_per_attr) {
 		/* make a room for new elements */
-		memmove(next + ds_root, next, used - aoff - asize);
+		mi_resize_attr(mi, attr, ds_root);
 		hdr->total = cpu_to_le32(hdr_total + ds_root);
 		e = hdr_insert_de(indx, hdr, new_de, root_de, ctx);
 		WARN_ON(!e);
 		fnd_clear(fnd);
 		fnd->root_de = e;
-		attr->size = cpu_to_le32(asize + ds_root);
-		attr->res.data_size = cpu_to_le32(root_size + ds_root);
-		rec->used = cpu_to_le32(used + ds_root);
-		mi->dirty = true;
 
 		return 0;
 	}
@@ -1645,15 +1637,8 @@ static int indx_insert_into_root(struct ntfs_index *indx, struct ntfs_inode *ni,
 		goto out;
 	}
 
-	if (ds_root) {
-		memmove(next + ds_root, next, tail);
-		used += ds_root;
-		asize += ds_root;
-		rec->used = cpu_to_le32(used);
-		attr->size = cpu_to_le32(asize);
-		attr->res.data_size = cpu_to_le32(new_root_size);
-		mi->dirty = true;
-	}
+	if (ds_root)
+		mi_resize_attr(mi, attr, ds_root);
 
 	/* Fill first entry (vcn will be set later) */
 	e = (struct NTFS_DE *)(root + 1);
@@ -1669,26 +1654,27 @@ static int indx_insert_into_root(struct ntfs_index *indx, struct ntfs_inode *ni,
 	mi->dirty = true;
 
 	/* Create alloc and bitmap attributes (if not) */
-	if (run_is_empty(&indx->alloc_run)) {
-		err = indx_create_allocate(indx, ni, &new_vbn);
-		if (err) {
-			/* restore root after 'indx_create_allocate' */
-			memmove(next - ds_root, next, tail);
-			used -= ds_root;
-			rec->used = cpu_to_le32(used);
-			memcpy(attr, a_root, asize);
-			goto out1;
-		}
-	} else {
-		err = indx_add_allocate(indx, ni, &new_vbn);
-		if (err)
-			goto out1;
-	}
+	err = run_is_empty(&indx->alloc_run)
+		      ? indx_create_allocate(indx, ni, &new_vbn)
+		      : indx_add_allocate(indx, ni, &new_vbn);
 
 	/* layout of record may be changed, so rescan root */
 	root = indx_get_root(indx, ni, &attr, &mi);
 	if (!root) {
+		/* bug? */
+		ntfs_set_state(sbi, NTFS_DIRTY_ERROR);
 		err = -EINVAL;
+		goto out1;
+	}
+
+	if (err) {
+		/* restore root */
+		if (mi_resize_attr(mi, attr, -ds_root))
+			memcpy(attr, a_root, asize);
+		else {
+			/* bug? */
+			ntfs_set_state(sbi, NTFS_DIRTY_ERROR);
+		}
 		goto out1;
 	}
 
@@ -1850,9 +1836,9 @@ indx_insert_into_buffer(struct ntfs_index *indx, struct ntfs_inode *ni,
 	hdr_insert_de(indx,
 		      (*indx->cmp)(new_de + 1, le16_to_cpu(new_de->key_size),
 				   up_e + 1, le16_to_cpu(up_e->key_size),
-				   ctx) < 0 ?
-			      hdr2 :
-			      hdr1,
+				   ctx) < 0
+			      ? hdr2
+			      : hdr1,
 		      new_de, NULL, ctx);
 
 	indx_mark_used(indx, ni, new_vbn >> indx->idx2vbn_bits);
@@ -2010,7 +1996,7 @@ static int indx_shrink(struct ntfs_index *indx, struct ntfs_inode *ni,
 		       size_t bit)
 {
 	int err = 0;
-	u64 bpb, new_alloc;
+	u64 bpb, new_data;
 	size_t nbits;
 	struct ATTRIB *b;
 	struct ATTR_LIST_ENTRY *le = NULL;
@@ -2050,16 +2036,12 @@ static int indx_shrink(struct ntfs_index *indx, struct ntfs_inode *ni,
 			return 0;
 	}
 
-	new_alloc = (u64)bit << indx->index_bits;
+	new_data = (u64)bit << indx->index_bits;
 
 	err = attr_set_size(ni, ATTR_ALLOC, in->name, in->name_len,
-			    &indx->alloc_run, new_alloc, &new_alloc, false,
-			    NULL);
+			    &indx->alloc_run, new_data, &new_data, false, NULL);
 	if (err)
 		return err;
-
-	if (in->name == I30_NAME)
-		ni->vfs_inode.i_size = new_alloc;
 
 	bpb = bitmap_size(bit);
 	if (bpb * 8 == nbits)
@@ -2315,8 +2297,8 @@ int indx_delete_entry(struct ntfs_index *indx, struct ntfs_inode *ni,
 			err = level ? indx_insert_into_buffer(indx, ni, root,
 							      re, ctx,
 							      fnd->level - 1,
-							      fnd) :
-				      indx_insert_into_root(indx, ni, re, e,
+							      fnd)
+				    : indx_insert_into_root(indx, ni, re, e,
 							    ctx, fnd);
 			ntfs_free(re);
 
@@ -2582,9 +2564,6 @@ int indx_delete_entry(struct ntfs_index *indx, struct ntfs_inode *ni,
 		hdr->used = hdr->total = cpu_to_le32(
 			new_root_size - offsetof(struct INDEX_ROOT, ihdr));
 		mi->dirty = true;
-
-		if (in->name == I30_NAME)
-			ni->vfs_inode.i_size = 0;
 	}
 
 out:
