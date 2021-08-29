@@ -13,7 +13,6 @@
 #include <linux/namei.h>
 #include <linux/nls.h>
 #include <linux/uio.h>
-#include <linux/version.h>
 #include <linux/writeback.h>
 
 #include "debug.h"
@@ -1097,7 +1096,7 @@ ntfs_create_reparse_buffer(struct ntfs_sb_info *sbi, const char *symname,
 	__le16 *rp_name;
 	typeof(rp->SymbolicLinkReparseBuffer) *rs;
 
-	rp = ntfs_zalloc(ntfs_reparse_bytes(2 * size + 2));
+	rp = kzalloc(ntfs_reparse_bytes(2 * size + 2), GFP_NOFS);
 	if (!rp)
 		return ERR_PTR(-ENOMEM);
 
@@ -1152,7 +1151,7 @@ ntfs_create_reparse_buffer(struct ntfs_sb_info *sbi, const char *symname,
 
 	return rp;
 out:
-	ntfs_free(rp);
+	kfree(rp);
 	return ERR_PTR(err);
 }
 
@@ -1336,7 +1335,7 @@ struct inode *ntfs_create_inode(struct user_namespace *mnt_userns,
 	fname->dup.ea_size = fname->dup.reparse = 0;
 
 	dsize = le16_to_cpu(new_de->key_size);
-	asize = QuadAlign(SIZEOF_RESIDENT + dsize);
+	asize = ALIGN(SIZEOF_RESIDENT + dsize, 8);
 
 	attr->type = ATTR_NAME;
 	attr->size = cpu_to_le32(asize);
@@ -1350,7 +1349,7 @@ struct inode *ntfs_create_inode(struct user_namespace *mnt_userns,
 
 	if (security_id == SECURITY_ID_INVALID) {
 		/* Insert security attribute */
-		asize = SIZEOF_RESIDENT + QuadAlign(sd_size);
+		asize = SIZEOF_RESIDENT + ALIGN(sd_size, 8);
 
 		attr->type = ATTR_SECURE;
 		attr->size = cpu_to_le32(asize);
@@ -1473,7 +1472,7 @@ struct inode *ntfs_create_inode(struct user_namespace *mnt_userns,
 		attr->id = cpu_to_le16(aid++);
 
 		/* resident or non resident? */
-		asize = QuadAlign(SIZEOF_RESIDENT + nsize);
+		asize = ALIGN(SIZEOF_RESIDENT + nsize, 8);
 		t16 = PtrOffset(rec, attr);
 
 		if (asize + t16 + 8 > sbi->record_size) {
@@ -1509,7 +1508,7 @@ struct inode *ntfs_create_inode(struct user_namespace *mnt_userns,
 				goto out5;
 			}
 
-			asize = SIZEOF_NONRESIDENT + QuadAlign(err);
+			asize = SIZEOF_NONRESIDENT + ALIGN(err, 8);
 			inode->i_size = nsize;
 		} else {
 			attr->res.data_off = SIZEOF_RESIDENT_LE;
@@ -1620,7 +1619,7 @@ out3:
 
 out2:
 	__putname(new_de);
-	ntfs_free(rp);
+	kfree(rp);
 
 out1:
 	if (err)
@@ -1789,6 +1788,7 @@ out3:
 	switch (err) {
 	case 0:
 		drop_nlink(inode);
+		break;
 	case -ENOTEMPTY:
 	case -ENOSPC:
 	case -EROFS:
@@ -1862,7 +1862,7 @@ static noinline int ntfs_readlink_hlp(struct inode *inode, char *buffer,
 			goto out;
 		}
 	} else {
-		rp = ntfs_malloc(i_size);
+		rp = kmalloc(i_size, GFP_NOFS);
 		if (!rp) {
 			err = -ENOMEM;
 			goto out;
@@ -1972,7 +1972,7 @@ static noinline int ntfs_readlink_hlp(struct inode *inode, char *buffer,
 	/* Always set last zero */
 	buffer[err] = 0;
 out:
-	ntfs_free(to_free);
+	kfree(to_free);
 	return err;
 }
 
