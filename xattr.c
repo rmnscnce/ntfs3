@@ -314,8 +314,19 @@ static noinline int ntfs_set_ea(struct inode *inode, const char *name,
 			goto out;
 		}
 
-		/* Remove current xattr */
 		ea = Add2Ptr(ea_all, off);
+
+		/*
+		 * Check simple case when we try to insert xattr with the same value
+		 * e.g. ntfs_save_wsl_perm
+		 */
+		if (val_size && le16_to_cpu(ea->elength) == val_size &&
+		    !memcmp(ea->name + ea->name_len + 1, value, val_size)) {
+			/* xattr already contains the required value */
+			goto out;
+		}
+
+		/* Remove current xattr */
 		if (ea->flags & FILE_NEED_EA)
 			le16_add_cpu(&ea_info.count, -1);
 
@@ -330,8 +341,10 @@ static noinline int ntfs_set_ea(struct inode *inode, const char *name,
 
 		ea_info.size = cpu_to_le32(size);
 
-		if ((flags & XATTR_REPLACE) && !val_size)
+		if ((flags & XATTR_REPLACE) && !val_size) {
+			/* remove xattr */
 			goto update_ea;
+		}
 	} else {
 		if (flags & XATTR_REPLACE) {
 			err = -ENODATA;
@@ -526,8 +539,11 @@ static struct posix_acl *ntfs_get_acl_ex(struct user_namespace *mnt_userns,
  *
  * inode_operations::get_acl
  */
-struct posix_acl *ntfs_get_acl(struct inode *inode, int type)
+struct posix_acl *ntfs_get_acl(struct inode *inode, int type, bool rcu)
 {
+	if (rcu)
+		return ERR_PTR(-ECHILD);
+
 	/* TODO: init_user_ns? */
 	return ntfs_get_acl_ex(&init_user_ns, inode, type, 0);
 }
@@ -564,7 +580,6 @@ static noinline int ntfs_set_acl_ex(struct user_namespace *mnt_userns,
 				 * traditional file mode permission bits
 				 */
 				acl = NULL;
-				goto out;
 			}
 		}
 		name = XATTR_NAME_POSIX_ACL_ACCESS;
@@ -582,29 +597,27 @@ static noinline int ntfs_set_acl_ex(struct user_namespace *mnt_userns,
 		return -EINVAL;
 	}
 
-	if (!acl)
-		goto out;
+	if (!acl) {
+		size = 0;
+		value = NULL;
+	} else {
+		size = posix_acl_xattr_size(acl->a_count);
+		value = ntfs_malloc(size);
+		if (!value)
+			return -ENOMEM;
 
-	size = posix_acl_xattr_size(acl->a_count);
-	value = ntfs_malloc(size);
-	if (!value)
-		return -ENOMEM;
+		err = posix_acl_to_xattr(mnt_userns, acl, value, size);
+		if (err < 0)
+			goto out;
+	}
 
-	err = posix_acl_to_xattr(mnt_userns, acl, value, size);
-	if (err)
-		goto out;
-
-	err = ntfs_set_ea(inode, name, name_len, value, size, 0, locked);
-	if (err)
-		goto out;
-
-	inode->i_flags &= ~S_NOSEC;
-
-out:
+	err = ntfs_set_ea(inode, name, name_len, value, size,
+			  acl ? 0 : XATTR_REPLACE, locked);
 	if (!err)
 		set_cached_acl(inode, type, acl);
 
-	kfree(value);
+out:
+	ntfs_free(value);
 
 	return err;
 }
@@ -630,7 +643,7 @@ static int ntfs_xattr_get_acl(struct user_namespace *mnt_userns,
 	if (!(inode->i_sb->s_flags & SB_POSIXACL))
 		return -EOPNOTSUPP;
 
-	acl = ntfs_get_acl(inode, type);
+	acl = ntfs_get_acl(inode, type, false);
 	if (IS_ERR(acl))
 		return PTR_ERR(acl);
 
@@ -656,17 +669,18 @@ static int ntfs_xattr_set_acl(struct user_namespace *mnt_userns,
 	if (!inode_owner_or_capable(mnt_userns, inode))
 		return -EPERM;
 
-	if (!value)
-		return 0;
+	if (!value) {
+		acl = NULL;
+	} else {
+		acl = posix_acl_from_xattr(mnt_userns, value, size);
+		if (IS_ERR(acl))
+			return PTR_ERR(acl);
 
-	acl = posix_acl_from_xattr(mnt_userns, value, size);
-	if (IS_ERR(acl))
-		return PTR_ERR(acl);
-
-	if (acl) {
-		err = posix_acl_valid(mnt_userns, acl);
-		if (err)
-			goto release_and_out;
+		if (acl) {
+			err = posix_acl_valid(mnt_userns, acl);
+			if (err)
+				goto release_and_out;
+		}
 	}
 
 	err = ntfs_set_acl(mnt_userns, inode, acl, type);
@@ -1011,9 +1025,8 @@ set_new_fa:
 	    (name_len == sizeof(XATTR_NAME_POSIX_ACL_DEFAULT) - 1 &&
 	     !memcmp(name, XATTR_NAME_POSIX_ACL_DEFAULT,
 		     sizeof(XATTR_NAME_POSIX_ACL_DEFAULT)))) {
-		/* TODO: init_user_ns? */
 		err = ntfs_xattr_set_acl(
-			&init_user_ns, inode,
+			mnt_userns, inode,
 			name_len == sizeof(XATTR_NAME_POSIX_ACL_ACCESS) - 1
 				? ACL_TYPE_ACCESS
 				: ACL_TYPE_DEFAULT,
@@ -1028,19 +1041,91 @@ out:
 	return err;
 }
 
+/*
+ * ntfs_save_wsl_perm
+ *
+ * save uid/gid/mode in xattr
+ */
+int ntfs_save_wsl_perm(struct inode *inode)
+{
+	int err;
+	__le32 value;
+
+	value = cpu_to_le32(i_uid_read(inode));
+	err = ntfs_set_ea(inode, "$LXUID", sizeof("$LXUID") - 1, &value,
+			  sizeof(value), 0, 0);
+	if (err)
+		goto out;
+
+	value = cpu_to_le32(i_gid_read(inode));
+	err = ntfs_set_ea(inode, "$LXGID", sizeof("$LXGID") - 1, &value,
+			  sizeof(value), 0, 0);
+	if (err)
+		goto out;
+
+	value = cpu_to_le32(inode->i_mode);
+	err = ntfs_set_ea(inode, "$LXMOD", sizeof("$LXMOD") - 1, &value,
+			  sizeof(value), 0, 0);
+	if (err)
+		goto out;
+
+	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode)) {
+		value = cpu_to_le32(inode->i_rdev);
+		err = ntfs_set_ea(inode, "$LXDEV", sizeof("$LXDEV") - 1, &value,
+				  sizeof(value), 0, 0);
+		if (err)
+			goto out;
+	}
+
+out:
+	/* In case of error should we delete all WSL xattr? */
+	return err;
+}
+
+/*
+ * ntfs_get_wsl_perm
+ *
+ * get uid/gid/mode from xattr
+ * it is called from ntfs_iget5->ntfs_read_mft
+ */
+void ntfs_get_wsl_perm(struct inode *inode)
+{
+	size_t sz;
+	__le32 value[3];
+
+	if (ntfs_get_ea(inode, "$LXUID", sizeof("$LXUID") - 1, &value[0],
+			sizeof(value[0]), &sz) == sizeof(value[0]) &&
+	    ntfs_get_ea(inode, "$LXGID", sizeof("$LXGID") - 1, &value[1],
+			sizeof(value[1]), &sz) == sizeof(value[1]) &&
+	    ntfs_get_ea(inode, "$LXMOD", sizeof("$LXMOD") - 1, &value[2],
+			sizeof(value[2]), &sz) == sizeof(value[2])) {
+		i_uid_write(inode, (uid_t)le32_to_cpu(value[0]));
+		i_gid_write(inode, (gid_t)le32_to_cpu(value[1]));
+		inode->i_mode = le32_to_cpu(value[2]);
+
+		if (ntfs_get_ea(inode, "$LXDEV", sizeof("$$LXDEV") - 1,
+				&value[0], sizeof(value),
+				&sz) == sizeof(value[0])) {
+			inode->i_rdev = le32_to_cpu(value[0]);
+		}
+	}
+}
+
 static bool ntfs_xattr_user_list(struct dentry *dentry)
 {
 	return true;
 }
 
+// clang-format off
 static const struct xattr_handler ntfs_xattr_handler = {
-	.prefix = "",
-	.get = ntfs_getxattr,
-	.set = ntfs_setxattr,
-	.list = ntfs_xattr_user_list,
+	.prefix	= "",
+	.get	= ntfs_getxattr,
+	.set	= ntfs_setxattr,
+	.list	= ntfs_xattr_user_list,
 };
 
 const struct xattr_handler *ntfs_xattr_handlers[] = {
 	&ntfs_xattr_handler,
 	NULL,
 };
+// clang-format on

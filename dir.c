@@ -585,10 +585,12 @@ bool dir_is_empty(struct inode *dir)
 	return is_empty;
 }
 
+// clang-format off
 const struct file_operations ntfs_dir_operations = {
-	.llseek = generic_file_llseek,
-	.read = generic_read_dir,
-	.iterate_shared = ntfs_readdir,
-	.fsync = generic_file_fsync,
-	.open = ntfs_file_open,
+	.llseek		= generic_file_llseek,
+	.read		= generic_read_dir,
+	.iterate_shared	= ntfs_readdir,
+	.fsync		= generic_file_fsync,
+	.open		= ntfs_file_open,
 };
+// clang-format on
