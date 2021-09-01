@@ -199,6 +199,7 @@ int attr_allocate_clusters(struct ntfs_sb_info *sbi, struct runs_tree *run,
 
 		/* Add new fragment into run storage. */
 		if (!run_add_entry(run, vcn, lcn, flen, opt == ALLOCATE_MFT)) {
+			/* Undo last 'ntfs_look_for_free_space' */
 			down_write_nested(&wnd->rw_lock, BITMAP_MUTEX_CLUSTERS);
 			wnd_set_free(wnd, lcn, flen);
 			up_write(&wnd->rw_lock);
@@ -218,9 +219,11 @@ int attr_allocate_clusters(struct ntfs_sb_info *sbi, struct runs_tree *run,
 	}
 
 out:
-	/* Undo. */
-	run_deallocate_ex(sbi, run, vcn0, vcn - vcn0, NULL, false);
-	run_truncate(run, vcn0);
+	/* Undo 'ntfs_look_for_free_space' */
+	if (vcn - vcn0) {
+		run_deallocate_ex(sbi, run, vcn0, vcn - vcn0, NULL, false);
+		run_truncate(run, vcn0);
+	}
 
 	return err;
 }
@@ -349,7 +352,6 @@ out2:
 	run_close(run);
 out1:
 	kfree(attr_s);
-	/* Reinsert le. */
 out:
 	return err;
 }
@@ -701,7 +703,7 @@ pack_runs:
 			 * (list entry for std attribute always first).
 			 * So it is safe to step back.
 			 */
-			mi_remove_attr(mi, attr);
+			mi_remove_attr(NULL, mi, attr);
 
 			if (!al_remove_le(ni, le)) {
 				err = -EINVAL;
@@ -1004,7 +1006,7 @@ repack:
 			end = next_svcn;
 		while (end > evcn) {
 			/* Remove segment [svcn : evcn). */
-			mi_remove_attr(mi, attr);
+			mi_remove_attr(NULL, mi, attr);
 
 			if (!al_remove_le(ni, le)) {
 				err = -EINVAL;
@@ -1151,14 +1153,18 @@ int attr_load_runs_vcn(struct ntfs_inode *ni, enum ATTR_TYPE type,
 	u16 ro;
 
 	attr = ni_find_attr(ni, NULL, NULL, type, name, name_len, &vcn, NULL);
-	if (!attr)
+	if (!attr) {
+		/* Is record corrupted? */
 		return -ENOENT;
+	}
 
 	svcn = le64_to_cpu(attr->nres.svcn);
 	evcn = le64_to_cpu(attr->nres.evcn);
 
-	if (evcn < vcn || vcn < svcn)
+	if (evcn < vcn || vcn < svcn) {
+		/* Is record corrupted? */
 		return -EINVAL;
+	}
 
 	ro = le16_to_cpu(attr->nres.run_off);
 	err = run_unpack_ex(run, ni->mi.sbi, ni->mi.rno, svcn, evcn, svcn,
@@ -1169,7 +1175,7 @@ int attr_load_runs_vcn(struct ntfs_inode *ni, enum ATTR_TYPE type,
 }
 
 /*
- * attr_wof_load_runs_range - Load runs for given range [from to).
+ * attr_load_runs_range - Load runs for given range [from to).
  */
 int attr_load_runs_range(struct ntfs_inode *ni, enum ATTR_TYPE type,
 			 const __le16 *name, u8 name_len, struct runs_tree *run,
@@ -1600,7 +1606,7 @@ repack:
 			end = next_svcn;
 		while (end > evcn) {
 			/* Remove segment [svcn : evcn). */
-			mi_remove_attr(mi, attr);
+			mi_remove_attr(NULL, mi, attr);
 
 			if (!al_remove_le(ni, le)) {
 				err = -EINVAL;
@@ -1836,13 +1842,12 @@ int attr_collapse_range(struct ntfs_inode *ni, u64 vbo, u64 bytes)
 			u16 le_sz;
 			u16 roff = le16_to_cpu(attr->nres.run_off);
 
-			/* run==1 means unpack and deallocate. */
 			run_unpack_ex(RUN_DEALLOCATE, sbi, ni->mi.rno, svcn,
 				      evcn1 - 1, svcn, Add2Ptr(attr, roff),
 				      le32_to_cpu(attr->size) - roff);
 
 			/* Delete this attribute segment. */
-			mi_remove_attr(mi, attr);
+			mi_remove_attr(NULL, mi, attr);
 			if (!le)
 				break;
 
@@ -1973,7 +1978,7 @@ int attr_punch_hole(struct ntfs_inode *ni, u64 vbo, u64 bytes, u32 *frame_size)
 	total_size = le64_to_cpu(attr_b->nres.total_size);
 
 	if (vbo >= alloc_size) {
-		// NOTE: It is allowed.
+		/* NOTE: It is allowed. */
 		return 0;
 	}
 
@@ -1985,9 +1990,9 @@ int attr_punch_hole(struct ntfs_inode *ni, u64 vbo, u64 bytes, u32 *frame_size)
 	bytes -= vbo;
 
 	if ((vbo & mask) || (bytes & mask)) {
-		/* We have to zero a range(s)*/
+		/* We have to zero a range(s). */
 		if (frame_size == NULL) {
-			/* Caller insists range is aligned */
+			/* Caller insists range is aligned. */
 			return -EINVAL;
 		}
 		*frame_size = mask + 1;

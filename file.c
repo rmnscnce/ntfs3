@@ -12,7 +12,6 @@
 #include <linux/compat.h>
 #include <linux/falloc.h>
 #include <linux/fiemap.h>
-#include <linux/msdos_fs.h> /* FAT_IOCTL_XXX */
 #include <linux/nls.h>
 
 #include "debug.h"
@@ -52,15 +51,8 @@ static long ntfs_ioctl(struct file *filp, u32 cmd, unsigned long arg)
 {
 	struct inode *inode = file_inode(filp);
 	struct ntfs_sb_info *sbi = inode->i_sb->s_fs_info;
-	u32 __user *user_attr = (u32 __user *)arg;
 
 	switch (cmd) {
-	case FAT_IOCTL_GET_ATTRIBUTES:
-		return put_user(le32_to_cpu(ntfs_i(inode)->std_fa), user_attr);
-
-	case FAT_IOCTL_GET_VOLUME_ID:
-		return put_user(sbi->volume.ser_num, user_attr);
-
 	case FITRIM:
 		return ntfs_ioctl_fitrim(sbi, arg);
 	}
@@ -198,7 +190,8 @@ out:
 
 /*
  * ntfs_zero_range - Helper function for punch_hole.
- * It zeroes a range [vbo, vbo_to)
+ *
+ * It zeroes a range [vbo, vbo_to).
  */
 static int ntfs_zero_range(struct inode *inode, u64 vbo, u64 vbo_to)
 {
@@ -239,12 +232,12 @@ static int ntfs_zero_range(struct inode *inode, u64 vbo, u64 vbo_to)
 
 			if (!buffer_mapped(bh)) {
 				ntfs_get_block(inode, iblock, bh, 0);
-				/* unmapped? It's a hole - nothing to do */
+				/* Unmapped? It's a hole - nothing to do. */
 				if (!buffer_mapped(bh))
 					continue;
 			}
 
-			/* Ok, it's mapped. Make sure it's up-to-date */
+			/* Ok, it's mapped. Make sure it's up-to-date. */
 			if (PageUptodate(page))
 				set_buffer_uptodate(bh);
 
@@ -280,9 +273,8 @@ out:
 }
 
 /*
- * ntfs_sparse_cluster
+ * ntfs_sparse_cluster - Helper function to zero a new allocated clusters.
  *
- * Helper function to zero a new allocated clusters
  * NOTE: 512 <= cluster size <= 2M
  */
 void ntfs_sparse_cluster(struct inode *inode, struct page *page0, CLST vcn,
@@ -596,7 +588,7 @@ static long ntfs_fallocate(struct file *file, int mode, loff_t vbo, loff_t len)
 		truncate_pagecache(inode, vbo_down);
 
 		if (!is_sparsed(ni) && !is_compressed(ni)) {
-			/* normal file */
+			/* Normal file. */
 			err = ntfs_zero_range(inode, vbo, end);
 			goto out;
 		}
@@ -607,7 +599,7 @@ static long ntfs_fallocate(struct file *file, int mode, loff_t vbo, loff_t len)
 		if (err != E_NTFS_NOTALIGNED)
 			goto out;
 
-		/* process not aligned punch */
+		/* Process not aligned punch. */
 		mask = frame_size - 1;
 		vbo_a = (vbo + mask) & ~mask;
 		end_a = end & ~mask;
@@ -655,7 +647,7 @@ static long ntfs_fallocate(struct file *file, int mode, loff_t vbo, loff_t len)
 		if (err)
 			goto out;
 
-		/* Wait for existing dio to complete */
+		/* Wait for existing dio to complete. */
 		inode_dio_wait(inode);
 
 		truncate_pagecache(inode, vbo_down);
@@ -1135,7 +1127,7 @@ static ssize_t ntfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		goto out;
 
 	if (WARN_ON(ni->ni_flags & NI_FLAG_COMPRESSED_MASK)) {
-		/* Should never be here, see ntfs_file_open() */
+		/* Should never be here, see ntfs_file_open(). */
 		ret = -EOPNOTSUPP;
 		goto out;
 	}
