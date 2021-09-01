@@ -2,7 +2,7 @@
 
 **ntfs3** is a free (as in free beer **and** free speech) filesystem kernel module for Linux kernel that is developed by Paragon Software.
 
-This **unofficial** out-of-tree module is tested to be compatible with Linux kernel 5.8 and later
+This **unofficial** out-of-tree module is tested to be compatible with Linux kernel 5.14 and later
 
 ## Disclaimers
 Authorship and copyright are held by Paragon Software GmbH, while [rmnscnce](https://www.github.com/rmnscnce) is the maintainer of this "port", along with other contributors
